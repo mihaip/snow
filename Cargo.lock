@@ -4525,6 +4525,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow_frontend_im"
+version = "1.2.0"
+
+[[package]]
 name = "snow_nat"
 version = "1.2.0"
 dependencies = [
