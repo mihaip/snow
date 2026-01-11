@@ -14,6 +14,7 @@ pub mod adb;
 pub mod compact;
 pub mod egret;
 pub mod egret_common;
+#[cfg(not(target_os = "emscripten"))]
 pub mod localtalk_bridge;
 pub mod macii;
 pub mod maclc;
@@ -23,6 +24,8 @@ pub mod portable;
 pub mod rtc;
 pub mod scc;
 pub mod scsi;
+#[cfg_attr(not(target_os = "emscripten"), path = "serial_bridge.rs")]
+#[cfg_attr(target_os = "emscripten", path = "serial_bridge_emscripten.rs")]
 pub mod serial_bridge;
 pub mod sound;
 pub mod swim;
