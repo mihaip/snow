@@ -13,6 +13,7 @@ use crate::tickable::Ticks;
 pub mod adb;
 pub mod asc;
 pub mod compact;
+#[cfg(not(target_os = "emscripten"))]
 pub mod localtalk_bridge;
 pub mod macii;
 pub mod nubus;
@@ -21,6 +22,8 @@ pub mod portable;
 pub mod rtc;
 pub mod scc;
 pub mod scsi;
+#[cfg_attr(not(target_os = "emscripten"), path = "serial_bridge.rs")]
+#[cfg_attr(target_os = "emscripten", path = "serial_bridge_emscripten.rs")]
 pub mod serial_bridge;
 pub mod swim;
 pub mod via;
