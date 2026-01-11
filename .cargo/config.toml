@@ -1,0 +1,15 @@
+[target.wasm32-unknown-emscripten]
+rustflags = [
+    "-C", "link-arg=-sINITIAL_MEMORY=167772160", # 128 MB RAM + 32M MB overhead
+    "-C", "link-arg=-sMODULARIZE",
+    "-C", "link-arg=-sEXPORT_ES6",
+    "-C", "link-arg=-sEXPORT_NAME=emulator",
+    "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=['FS','HEAPU8']",
+    "-C", "link-arg=-sENVIRONMENT=worker",
+    "-C", "link-arg=-gsource-map",
+    "-C", "link-arg=-g2",
+    "-C", "link-arg=-lexports.js",
+]
+
+[profile.release]
+lto = true
