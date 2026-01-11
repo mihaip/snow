@@ -1,0 +1,13 @@
+[package]
+name = "snow_frontend_im"
+version = "1.2.0"
+edition = "2021"
+
+[[bin]]
+name = "snow"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
