@@ -8,6 +8,7 @@ name = "snow"
 path = "src/main.rs"
 
 [dependencies]
+snow_core = { path = "../core" }
 
 [lints]
 workspace = true
