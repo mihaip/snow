@@ -1,6 +1,7 @@
 [target.wasm32-unknown-emscripten]
 rustflags = [
-    "-C", "link-arg=-sINITIAL_MEMORY=167772160", # 128 MB RAM + 32M MB overhead
+    "-C", "link-arg=-sSTACK_SIZE=16mb",
+    "-C", "link-arg=-sINITIAL_HEAP=160mb", # 128 MB RAM + 32M MB overhead
     "-C", "link-arg=-sMODULARIZE",
     "-C", "link-arg=-sEXPORT_ES6",
     "-C", "link-arg=-sEXPORT_NAME=emulator",
@@ -8,8 +9,17 @@ rustflags = [
     "-C", "link-arg=-sENVIRONMENT=worker",
     "-C", "link-arg=-gsource-map",
     "-C", "link-arg=-g2",
-    "-C", "link-arg=-lexports.js",
+    "-C", "link-arg=-L./frontend_im/src",
+    "-C", "link-arg=--js-library=./frontend_im/src/exports.js",
 ]
 
-[profile.release]
-lto = true
+[target.'cfg(all(target_arch = "wasm32", target_os = "emscripten", debug_assertions))']
+rustflags = [
+    "-C", "link-arg=-sASSERTIONS=2",
+    "-C", "link-arg=-sSTACK_OVERFLOW_CHECK=2",
+]
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "emscripten", not(debug_assertions)))']
+rustflags = [
+    "-C", "lto",
+]
