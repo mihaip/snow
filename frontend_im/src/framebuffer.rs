@@ -6,14 +6,14 @@ unsafe extern "C" {
     fn js_blit(buf_ptr: *const u8, buf_size: u32);
 }
 
-pub(crate) struct Sender {
+pub struct Sender {
     receiver: Receiver<DisplayBuffer>,
     current_width: u16,
     current_height: u16,
 }
 
 impl Sender {
-    pub(crate) fn new(receiver: Receiver<DisplayBuffer>) -> Self {
+    pub fn new(receiver: Receiver<DisplayBuffer>) -> Self {
         Self {
             receiver,
             current_width: 0,
@@ -21,7 +21,7 @@ impl Sender {
         }
     }
 
-    pub(crate) fn tick(&mut self) {
+    pub fn tick(&mut self) {
         while let Ok(frame) = self.receiver.try_recv() {
             self.send_frame(frame);
         }
