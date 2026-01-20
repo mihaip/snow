@@ -3,7 +3,6 @@ use snow_core::emulator::comm::EmulatorCommand;
 use snow_core::emulator::Emulator;
 use snow_core::mac::MacModel;
 use snow_core::tickable::Tickable;
-use std::path::Path;
 
 mod disk;
 mod framebuffer;
@@ -15,10 +14,8 @@ fn main() {
         .init();
 
     let mut args = pico_args::Arguments::from_env();
-    let rom_path: String = args
-        .value_from_str("--bootrom")
-        .unwrap_or_else(|_| "/rom".to_string());
-    let scsi_disk: Option<String> = args.opt_value_from_str("--scsi-disk").unwrap_or(None);
+    let rom_path: String = args.value_from_str("--rom").unwrap();
+    let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
 
     let rom_data = std::fs::read(&rom_path).expect("Failed to read ROM");
 
@@ -27,13 +24,17 @@ fn main() {
         Emulator::new(&rom_data, &[], model).expect("Failed to create emulator");
     let audio_receiver = emulator.get_audio();
 
-    if let Some(disk_name) = scsi_disk {
-        match JsDiskImage::open(Path::new(&disk_name)) {
-            Ok(disk) => {
-                if let Err(err) = emulator.attach_disk_image_at(Box::new(disk), 0) {
+    let mut scsi_disk_id = 0;
+    for disk_name in disk_names {
+        match JsDiskImage::open(disk_name.clone()) {
+            Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), scsi_disk_id) {
+                Ok(_) => {
+                    scsi_disk_id += 1;
+                }
+                Err(err) => {
                     log::error!("Failed to attach SCSI disk '{}': {}", disk_name, err);
                 }
-            }
+            },
             Err(err) => {
                 log::error!("Failed to open SCSI disk '{}': {}", disk_name, err);
             }
