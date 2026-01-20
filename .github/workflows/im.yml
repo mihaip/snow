@@ -1,0 +1,33 @@
+name: Infinite Mac checks
+
+on:
+    push:
+        branches: ["master"]
+        paths-ignore:
+            - "README.md"
+            - "docs/**"
+    pull_request:
+        branches: ["master"]
+        paths-ignore:
+            - "README.md"
+            - "docs/**"
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+            - name: Update package repos
+              run: sudo apt-get -y update
+            - name: Install prerequisites
+              run: sudo apt-get -y install libsdl2-dev
+            - name: Code formatting check
+              run: cargo fmt --check
+            - name: Clippy lint
+              run: cargo clippy --all -- -D warnings
+            - name: Build snow_frontend_im
+              run: cargo build -p snow_frontend_im --target wasm32-unknown-emscripten
