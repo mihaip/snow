@@ -3,7 +3,6 @@ use snow_core::mac::scsi::disk_image::DiskImage;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
-use std::path::PathBuf;
 
 unsafe extern "C" {
     fn js_disk_open(path: *const c_char) -> i32;
@@ -16,12 +15,11 @@ unsafe extern "C" {
 pub struct JsDiskImage {
     disk_id: i32,
     size_bytes: usize,
-    path: PathBuf,
+    disk_name: String,
 }
 
 impl JsDiskImage {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let disk_name = path.to_string_lossy();
+    pub fn open(disk_name: String) -> Result<Self, String> {
         let c_disk_name = CString::new(disk_name.as_bytes())
             .map_err(|_| "Disk name contains an embedded null byte".to_string())?;
         let disk_id = unsafe { js_disk_open(c_disk_name.as_ptr()) };
@@ -42,7 +40,7 @@ impl JsDiskImage {
         Ok(Self {
             disk_id,
             size_bytes,
-            path: path.to_path_buf(),
+            disk_name,
         })
     }
 }
@@ -81,7 +79,7 @@ impl DiskImage for JsDiskImage {
     }
 
     fn image_path(&self) -> Option<&Path> {
-        Some(self.path.as_ref())
+        Some(Path::new(&self.disk_name))
     }
 }
 
