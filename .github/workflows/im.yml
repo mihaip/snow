@@ -11,9 +11,12 @@ on:
         paths-ignore:
             - "README.md"
             - "docs/**"
+    workflow_dispatch:
 
 env:
     CARGO_TERM_COLOR: always
+    EM_VERSION: 4.0.22
+    EM_CACHE_FOLDER: emsdk-cache
 
 jobs:
     build:
@@ -21,10 +24,48 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
+            - name: Install wasm target
+              run: rustup target add wasm32-unknown-emscripten
+            - name: Cache apt packages
+              uses: actions/cache@v5
+              with:
+                path: |
+                  /var/cache/apt/archives
+                  /var/lib/apt/lists
+                key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/im.yml') }}
+                restore-keys: |
+                  ${{ runner.os }}-apt-
+            - name: Cache cargo registry
+              uses: actions/cache@v5
+              with:
+                path: |
+                  ~/.cargo/registry
+                  ~/.cargo/git
+                key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+                restore-keys: |
+                  ${{ runner.os }}-cargo-registry-
+            - name: Cache cargo build
+              uses: actions/cache@v5
+              with:
+                path: |
+                  target
+                key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('.github/workflows/im.yml') }}
+                restore-keys: |
+                  ${{ runner.os }}-cargo-target-
+            - name: Cache emsdk system libraries
+              uses: actions/cache@v5
+              with:
+                path: ${{ env.EM_CACHE_FOLDER }}
+                key: ${{ env.EM_VERSION }}-${{ runner.os }}-emsdk
             - name: Update package repos
               run: sudo apt-get -y update
             - name: Install prerequisites
               run: sudo apt-get -y install libsdl2-dev
+            - name: Install emsdk
+              uses: mymindstorm/setup-emsdk@v14
+              with:
+                version: ${{ env.EM_VERSION }}
+                actions-cache-folder: ${{ env.EM_CACHE_FOLDER }}
             - name: Code formatting check
               run: cargo fmt --check
             - name: Clippy lint
