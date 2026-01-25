@@ -59,6 +59,19 @@ mergeInto(LibraryManager.library, {
             workerApi.InputBufferAddresses.mouseButtonStateAddr
         );
     },
+    js_has_key_event: function() {
+        return workerApi.getInputValue(
+            workerApi.InputBufferAddresses.keyEventFlagAddr
+        );
+    },
+    js_get_key_code: function() {
+        return workerApi.getInputValue(workerApi.InputBufferAddresses.keyCodeAddr);
+    },
+    js_get_key_state: function() {
+        return workerApi.getInputValue(
+            workerApi.InputBufferAddresses.keyStateAddr
+        );
+    },
     js_console_log: function(ptr) {
         console.log(UTF8ToString(ptr));
     },
