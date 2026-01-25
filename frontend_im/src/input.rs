@@ -1,5 +1,6 @@
 use snow_core::emulator::comm::{EmulatorCommand, EmulatorCommandSender};
 use snow_core::emulator::MouseMode;
+use snow_core::keymap::{KeyEvent, Keymap};
 
 unsafe extern "C" {
     fn js_acquire_input_lock() -> i32;
@@ -10,6 +11,9 @@ unsafe extern "C" {
     fn js_get_mouse_delta_x() -> i32;
     fn js_get_mouse_delta_y() -> i32;
     fn js_get_mouse_button_state() -> i32;
+    fn js_has_key_event() -> i32;
+    fn js_get_key_code() -> i32;
+    fn js_get_key_state() -> i32;
 }
 
 pub struct Receiver {
@@ -32,6 +36,7 @@ impl Receiver {
         }
 
         self.handle_mouse();
+        self.handle_keyboard();
 
         unsafe {
             js_release_input_lock();
@@ -78,6 +83,21 @@ impl Receiver {
             }
         }
     }
+
+    fn handle_keyboard(&self) {
+        let has_key_event = unsafe { js_has_key_event() };
+        if has_key_event != 0 {
+            let key_code = unsafe { js_get_key_code() };
+            let key_state = unsafe { js_get_key_state() };
+            let scancode = clamp_i32_to_u8(key_code);
+            let event = if key_state == 0 {
+                KeyEvent::KeyUp(scancode, Keymap::Universal)
+            } else {
+                KeyEvent::KeyDown(scancode, Keymap::Universal)
+            };
+            let _ = self.cmd_sender.send(EmulatorCommand::KeyEvent(event));
+        }
+    }
 }
 
 fn clamp_i32_to_u16(value: i32) -> u16 {
@@ -86,4 +106,8 @@ fn clamp_i32_to_u16(value: i32) -> u16 {
 
 fn clamp_i32_to_i16(value: i32) -> i16 {
     value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn clamp_i32_to_u8(value: i32) -> u8 {
+    value.clamp(0, u8::MAX as i32) as u8
 }
