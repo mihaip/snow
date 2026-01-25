@@ -1,11 +1,12 @@
 use disk::JsDiskImage;
 use snow_core::emulator::comm::EmulatorCommand;
-use snow_core::emulator::Emulator;
+use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::MacModel;
 use snow_core::tickable::Tickable;
 
 mod disk;
 mod framebuffer;
+mod input;
 
 fn main() {
     env_logger::Builder::new()
@@ -16,12 +17,27 @@ fn main() {
     let mut args = pico_args::Arguments::from_env();
     let rom_path: String = args.value_from_str("--rom").unwrap();
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
+    let mouse_mode = if args.contains("--use-mouse-deltas") {
+        MouseMode::RelativeHw
+    } else {
+        MouseMode::Absolute
+    };
 
     let rom_data = std::fs::read(&rom_path).expect("Failed to read ROM");
 
     let model = MacModel::SE;
-    let (mut emulator, frame_receiver) =
-        Emulator::new(&rom_data, &[], model).expect("Failed to create emulator");
+    let (mut emulator, frame_receiver) = Emulator::new_with_extra(
+        &rom_data,
+        &[],
+        model,
+        None,
+        mouse_mode,
+        None,
+        None,
+        false,
+        None,
+    )
+    .expect("Failed to create emulator");
     let audio_receiver = emulator.get_audio();
 
     let mut scsi_disk_id = 0;
@@ -45,7 +61,10 @@ fn main() {
     cmd_sender.send(EmulatorCommand::Run).unwrap();
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
+    let input_receiver = input::Receiver::new(cmd_sender, mouse_mode);
     loop {
+        input_receiver.tick();
+
         if let Err(e) = emulator.tick(1) {
             log::error!("Emulator tick error: {:?}", e);
             break;
