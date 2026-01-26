@@ -4,6 +4,7 @@ use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::MacModel;
 use snow_core::tickable::Tickable;
 
+mod audio;
 mod disk;
 mod framebuffer;
 mod input;
@@ -38,7 +39,7 @@ fn main() {
         None,
     )
     .expect("Failed to create emulator");
-    let audio_receiver = emulator.get_audio();
+    emulator.set_audio_sink(Box::new(audio::JsAudioSink::new()));
 
     let mut scsi_disk_id = 0;
     for disk_name in disk_names {
@@ -71,8 +72,5 @@ fn main() {
         }
 
         framebuffer_sender.tick();
-
-        // Drain audio to avoid blocking the emulator when no audio output is wired up.
-        while audio_receiver.try_recv().is_ok() {}
     }
 }
