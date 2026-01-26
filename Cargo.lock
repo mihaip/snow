@@ -4632,6 +4632,7 @@ dependencies = [
 name = "snow_frontend_im"
 version = "1.2.0"
 dependencies = [
+ "anyhow",
  "crossbeam-channel",
  "env_logger",
  "log",
