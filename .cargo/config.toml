@@ -10,7 +10,7 @@ rustflags = [
     "-C", "link-arg=-gsource-map",
     "-C", "link-arg=-g2",
     "-C", "link-arg=-L./frontend_im/src",
-    "-C", "link-arg=--js-library=./frontend_im/src/exports.js",
+    "-C", "link-arg=--js-library=./frontend_im/src/js_api/exports.js",
 ]
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "emscripten", debug_assertions))']
