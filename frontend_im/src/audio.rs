@@ -1,12 +1,7 @@
 use anyhow::Result;
 use snow_core::renderer::{AudioBuffer, AudioSink, AUDIO_BUFFER_SIZE, AUDIO_QUEUE_LEN};
 
-unsafe extern "C" {
-    fn js_did_open_audio(sample_rate: u32, sample_size: u32, channels: u32);
-    fn js_audio_buffer_size() -> i32;
-    fn js_enqueue_audio(buf_ptr: *const u8, buf_size: u32);
-    fn js_sleep(secs: f64);
-}
+use crate::js_api;
 
 // Matches the configuration in SDLAudioSink (and thus the monitor horizontal
 // sync rate)
@@ -27,9 +22,7 @@ pub struct JsAudioSink;
 
 impl JsAudioSink {
     pub fn new() -> Self {
-        unsafe {
-            js_did_open_audio(SAMPLE_RATE, SAMPLE_SIZE_BITS, CHANNELS);
-        }
+        js_api::audio::did_open(SAMPLE_RATE, SAMPLE_SIZE_BITS, CHANNELS);
         Self
     }
 }
@@ -39,7 +32,7 @@ impl AudioSink for JsAudioSink {
         let expected_len = buffer.len() * BYTES_PER_SAMPLE;
         let max_fill = MAX_JS_BUFFER_BYTES.saturating_sub(expected_len);
         loop {
-            let js_buffer_size = unsafe { js_audio_buffer_size() };
+            let js_buffer_size = js_api::audio::buffer_size();
             if js_buffer_size < 0 || js_buffer_size as usize <= max_fill {
                 break;
             }
@@ -49,15 +42,12 @@ impl AudioSink for JsAudioSink {
             let wait_bytes = js_buffer_size as usize - max_fill;
             let wait_seconds = ((wait_bytes as f64 / BYTES_PER_SECOND as f64) * 0.75)
                 .clamp(0.0, AUDIO_WORKLET_QUANTUM_SECONDS);
-            unsafe {
-                js_sleep(wait_seconds);
-            }
+            js_api::runtime::sleep_seconds(wait_seconds);
         }
 
-        unsafe {
-            let bytes = std::slice::from_raw_parts(buffer.as_ptr() as *const u8, expected_len);
-            js_enqueue_audio(bytes.as_ptr(), bytes.len() as u32);
-        }
+        let bytes =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, expected_len) };
+        js_api::audio::enqueue(bytes);
         Ok(())
     }
 }

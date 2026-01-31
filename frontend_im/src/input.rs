@@ -2,19 +2,7 @@ use snow_core::emulator::comm::{EmulatorCommand, EmulatorCommandSender};
 use snow_core::emulator::MouseMode;
 use snow_core::keymap::{KeyEvent, Keymap};
 
-unsafe extern "C" {
-    fn js_acquire_input_lock() -> i32;
-    fn js_release_input_lock();
-    fn js_has_mouse_position() -> i32;
-    fn js_get_mouse_x_position() -> i32;
-    fn js_get_mouse_y_position() -> i32;
-    fn js_get_mouse_delta_x() -> i32;
-    fn js_get_mouse_delta_y() -> i32;
-    fn js_get_mouse_button_state() -> i32;
-    fn js_has_key_event() -> i32;
-    fn js_get_key_code() -> i32;
-    fn js_get_key_state() -> i32;
-}
+use crate::js_api;
 
 pub struct Receiver {
     cmd_sender: EmulatorCommandSender,
@@ -30,23 +18,18 @@ impl Receiver {
     }
 
     pub fn tick(&self) {
-        let lock = unsafe { js_acquire_input_lock() };
-        if lock == 0 {
+        if !js_api::input::acquire_lock() {
             return;
         }
 
         self.handle_mouse();
         self.handle_keyboard();
 
-        unsafe {
-            js_release_input_lock();
-        }
+        js_api::input::release_lock();
     }
 
     fn handle_mouse(&self) {
-        let mouse_button_state = unsafe { js_get_mouse_button_state() };
-        if mouse_button_state > -1 {
-            let btn_pressed = mouse_button_state != 0;
+        if let Some(btn_pressed) = js_api::input::mouse_button_state() {
             let _ = self.cmd_sender.send(EmulatorCommand::MouseUpdateRelative {
                 relx: 0,
                 rely: 0,
@@ -54,12 +37,10 @@ impl Receiver {
             });
         }
 
-        let has_mouse_position = unsafe { js_has_mouse_position() };
-        if has_mouse_position != 0 {
+        if js_api::input::has_mouse_position() {
             match self.mouse_mode {
                 MouseMode::RelativeHw => {
-                    let mouse_delta_x = unsafe { js_get_mouse_delta_x() };
-                    let mouse_delta_y = unsafe { js_get_mouse_delta_y() };
+                    let (mouse_delta_x, mouse_delta_y) = js_api::input::mouse_delta();
                     if mouse_delta_x != 0 || mouse_delta_y != 0 {
                         let relx = clamp_i32_to_i16(mouse_delta_x);
                         let rely = clamp_i32_to_i16(mouse_delta_y);
@@ -71,8 +52,7 @@ impl Receiver {
                     }
                 }
                 MouseMode::Absolute => {
-                    let mouse_pos_x = unsafe { js_get_mouse_x_position() };
-                    let mouse_pos_y = unsafe { js_get_mouse_y_position() };
+                    let (mouse_pos_x, mouse_pos_y) = js_api::input::mouse_position();
                     let x = clamp_i32_to_u16(mouse_pos_x);
                     let y = clamp_i32_to_u16(mouse_pos_y);
                     let _ = self
@@ -85,10 +65,9 @@ impl Receiver {
     }
 
     fn handle_keyboard(&self) {
-        let has_key_event = unsafe { js_has_key_event() };
-        if has_key_event != 0 {
-            let key_code = unsafe { js_get_key_code() };
-            let key_state = unsafe { js_get_key_state() };
+        if js_api::input::has_key_event() {
+            let key_code = js_api::input::key_code();
+            let key_state = js_api::input::key_state();
             let scancode = clamp_i32_to_u8(key_code);
             let event = if key_state == 0 {
                 KeyEvent::KeyUp(scancode, Keymap::Universal)

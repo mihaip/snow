@@ -1,8 +1,9 @@
 // JavaScript exports for Snow Emscripten frontend
-// These functions are callable from Rust via extern "C"
+// Should only be used in the js_api module, and exposed as safe Rust functions
+// outside of it.
 
 mergeInto(LibraryManager.library, {
-    // Internals
+    // Runtime
     js_sleep(seconds) {
         workerApi.sleep(seconds);
     },
