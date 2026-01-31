@@ -4638,6 +4638,7 @@ dependencies = [
  "log",
  "pico-args",
  "snow_core",
+ "snow_floppy",
 ]
 
 [[package]]
