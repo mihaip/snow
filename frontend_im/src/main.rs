@@ -10,6 +10,7 @@ mod disk;
 mod floppy;
 mod framebuffer;
 mod input;
+mod js_api;
 
 fn main() {
     env_logger::Builder::new()
@@ -84,7 +85,7 @@ fn main() {
 
     let mut scsi_disk_id = 0;
     for disk_name in disk_names {
-        match JsDiskImage::open(disk_name.clone()) {
+        match JsDiskImage::open(&disk_name) {
             Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), scsi_disk_id) {
                 Ok(_) => {
                     scsi_disk_id += 1;
