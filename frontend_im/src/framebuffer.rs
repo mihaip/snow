@@ -1,10 +1,7 @@
 use crossbeam_channel::Receiver;
 use snow_core::renderer::DisplayBuffer;
 
-unsafe extern "C" {
-    fn js_did_open_video(width: u32, height: u32);
-    fn js_blit(buf_ptr: *const u8, buf_size: u32);
-}
+use crate::js_api;
 
 pub struct Sender {
     receiver: Receiver<DisplayBuffer>,
@@ -32,18 +29,12 @@ impl Sender {
         let height = frame.height();
 
         if width != self.current_width || height != self.current_height {
-            unsafe {
-                js_did_open_video(width as u32, height as u32);
-            }
+            js_api::video::did_open(width as u32, height as u32);
             self.current_width = width;
             self.current_height = height;
         }
 
         let data = frame.into_inner();
-        if !data.is_empty() {
-            unsafe {
-                js_blit(data.as_ptr(), data.len() as u32);
-            }
-        }
+        js_api::video::blit(&data);
     }
 }
