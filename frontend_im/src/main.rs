@@ -1,4 +1,5 @@
 use disk::JsDiskImage;
+use floppy::load_floppy_image;
 use snow_core::emulator::comm::EmulatorCommand;
 use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
@@ -6,6 +7,7 @@ use snow_core::tickable::Tickable;
 
 mod audio;
 mod disk;
+mod floppy;
 mod framebuffer;
 mod input;
 
@@ -18,6 +20,7 @@ fn main() {
     let mut args = pico_args::Arguments::from_env();
     let rom_path: String = args.value_from_str("--rom").unwrap();
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
+    let floppy_names: Vec<String> = args.values_from_str("--floppy").unwrap_or_default();
     let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
@@ -97,6 +100,29 @@ fn main() {
     }
 
     let cmd_sender = emulator.create_cmd_sender();
+    let mut floppy_drive = 0usize;
+    for floppy_name in floppy_names {
+        if floppy_drive >= 3 {
+            log::warn!("Skipping floppy '{}': no free drive (max 3)", floppy_name);
+            continue;
+        }
+        match load_floppy_image(&floppy_name) {
+            Ok(img) => {
+                if let Err(err) = cmd_sender.send(EmulatorCommand::InsertFloppyImage(
+                    floppy_drive,
+                    Box::new(img),
+                    false,
+                )) {
+                    log::error!("Failed to insert floppy '{}': {}", floppy_name, err);
+                } else {
+                    floppy_drive += 1;
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to open floppy '{}': {}", floppy_name, err);
+            }
+        }
+    }
     cmd_sender.send(EmulatorCommand::Run).unwrap();
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
