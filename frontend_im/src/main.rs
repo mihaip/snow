@@ -1,7 +1,7 @@
 use disk::JsDiskImage;
 use snow_core::emulator::comm::EmulatorCommand;
 use snow_core::emulator::{Emulator, MouseMode};
-use snow_core::mac::MacModel;
+use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
 
 mod audio;
@@ -18,6 +18,10 @@ fn main() {
     let mut args = pico_args::Arguments::from_env();
     let rom_path: String = args.value_from_str("--rom").unwrap();
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
+    let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
+    let ram_size: usize = args.value_from_str("--ram-size").unwrap();
+    let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
+    let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
     let mouse_mode = if args.contains("--use-mouse-deltas") {
         MouseMode::RelativeHw
     } else {
@@ -26,14 +30,48 @@ fn main() {
 
     let rom_data = std::fs::read(&rom_path).expect("Failed to read ROM");
 
-    let model = MacModel::SE;
+    let model = model_from_gestalt(gestalt_id)
+        .unwrap_or_else(|| panic!("Unknown gestalt ID {} (no matching Snow model)", gestalt_id));
+    if !model.ram_size_options().contains(&ram_size) {
+        panic!(
+            "Unsupported RAM size {} for {} (default {})",
+            ram_size,
+            model,
+            model.ram_size_default()
+        );
+    }
+    let monitor = monitor_id.map(|id| match id.as_str() {
+        "RGB12" => MacMonitor::RGB12,
+        "HiRes14" => MacMonitor::HiRes14,
+        "RGB21" => MacMonitor::RGB21,
+        "PortraitBW" => MacMonitor::PortraitBW,
+        _ => panic!("Unknown monitor ID '{}'", id),
+    });
+
+    let mut extra_rom_data = Vec::new();
+    for rom_path in extra_rom_paths {
+        let data = std::fs::read(&rom_path)
+            .unwrap_or_else(|err| panic!("Failed to read extra ROM '{}': {}", rom_path, err));
+        extra_rom_data.push((rom_path, data));
+    }
+    let mut extra_roms = Vec::new();
+    for (rom_path, data) in &extra_rom_data {
+        let data_ref = data.as_slice();
+        let rom = match rom_path.as_str() {
+            "mac-ii-display-card-8-24.rom" => ExtraROMs::MDC12(data_ref),
+            "se30-video.rom" => ExtraROMs::SE30Video(data_ref),
+            "extension.rom" => ExtraROMs::ExtensionROM(data_ref),
+            _ => panic!("Unknown extra ROM '{}'", rom_path),
+        };
+        extra_roms.push(rom);
+    }
     let (mut emulator, frame_receiver) = Emulator::new_with_extra(
         &rom_data,
-        &[],
+        &extra_roms,
         model,
-        None,
+        monitor,
         mouse_mode,
-        None,
+        Some(ram_size),
         None,
         false,
         None,
@@ -73,4 +111,24 @@ fn main() {
 
         framebuffer_sender.tick();
     }
+}
+
+const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
+    (1, MacModel::Early128K),
+    (2, MacModel::Early512K),
+    (3, MacModel::Early512Ke),
+    (4, MacModel::Plus),
+    (5, MacModel::SE),
+    (6, MacModel::MacII),
+    (7, MacModel::MacIIx),
+    (8, MacModel::MacIIcx),
+    (9, MacModel::SE30),
+    (17, MacModel::Classic),
+];
+
+fn model_from_gestalt(gestalt_id: u32) -> Option<MacModel> {
+    GESTALT_MODEL_MAP
+        .iter()
+        .find(|(id, _)| *id == gestalt_id)
+        .map(|(_, model)| *model)
 }
