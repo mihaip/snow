@@ -1,5 +1,5 @@
-use std::ffi::CString;
-use std::os::raw::c_char;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_void};
 
 extern "C" {
     fn js_disk_open(path: *const c_char) -> i32;
@@ -7,6 +7,8 @@ extern "C" {
     fn js_disk_size(disk_id: i32) -> f64;
     fn js_disk_read(disk_id: i32, buf_ptr: *mut u8, offset: f64, length: f64) -> f64;
     fn js_disk_write(disk_id: i32, buf_ptr: *const u8, offset: f64, length: f64) -> f64;
+    fn js_consume_cdrom_name() -> *mut c_char;
+    fn js_free(ptr: *mut c_void);
 }
 
 pub struct DiskHandle {
@@ -93,4 +95,18 @@ impl Drop for DiskHandle {
             }
         }
     }
+}
+
+pub fn consume_cdrom_name() -> Option<String> {
+    let name_ptr = unsafe { js_consume_cdrom_name() };
+    if name_ptr.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(name_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe {
+        js_free(name_ptr as *mut c_void);
+    }
+    Some(name)
 }

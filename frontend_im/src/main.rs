@@ -1,11 +1,14 @@
 use disk::JsDiskImage;
 use floppy::load_floppy_image;
-use snow_core::emulator::comm::EmulatorCommand;
+use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus};
 use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
 
+use crate::cdrom::CdromManager;
+
 mod audio;
+mod cdrom;
 mod disk;
 mod floppy;
 mod framebuffer;
@@ -22,6 +25,7 @@ fn main() {
     let rom_path: String = args.value_from_str("--rom").unwrap();
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
     let floppy_names: Vec<String> = args.values_from_str("--floppy").unwrap_or_default();
+    let cdrom_names: Vec<String> = args.values_from_str("--cdrom").unwrap_or_default();
     let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
@@ -83,12 +87,12 @@ fn main() {
     .expect("Failed to create emulator");
     emulator.set_audio_sink(Box::new(audio::JsAudioSink::new()));
 
-    let mut scsi_disk_id = 0;
+    let mut next_scsi_id = 0;
     for disk_name in disk_names {
         match JsDiskImage::open(&disk_name) {
-            Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), scsi_disk_id) {
+            Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), next_scsi_id) {
                 Ok(_) => {
-                    scsi_disk_id += 1;
+                    next_scsi_id += 1;
                 }
                 Err(err) => {
                     log::error!("Failed to attach SCSI disk '{}': {}", disk_name, err);
@@ -100,7 +104,14 @@ fn main() {
         }
     }
 
+    let mut cdrom_manager = CdromManager::new(&mut emulator, next_scsi_id, cdrom_names);
+    if cdrom_manager.is_some() {
+        next_scsi_id += 1;
+    }
+    log::info!("Initialized {} SCSI devices", next_scsi_id);
+
     let cmd_sender = emulator.create_cmd_sender();
+    let event_recv = emulator.create_event_recv();
     let mut floppy_drive = 0usize;
     for floppy_name in floppy_names {
         if floppy_drive >= 3 {
@@ -128,8 +139,23 @@ fn main() {
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
     let input_receiver = input::Receiver::new(cmd_sender, mouse_mode);
+    let mut last_status: Option<Box<EmulatorStatus>> = None;
     loop {
+        js_api::runtime::check_for_periodic_tasks();
         input_receiver.tick();
+
+        while let Ok(event) = event_recv.try_recv() {
+            match event {
+                EmulatorEvent::Status(status) => {
+                    last_status = Some(status);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(cdrom_manager) = cdrom_manager.as_mut() {
+            cdrom_manager.tick(&mut emulator, last_status.as_deref());
+        }
 
         if let Err(e) = emulator.tick(1) {
             log::error!("Emulator tick error: {:?}", e);
