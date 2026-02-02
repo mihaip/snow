@@ -7,6 +7,9 @@ mergeInto(LibraryManager.library, {
     js_sleep(seconds) {
         workerApi.sleep(seconds);
     },
+    js_check_for_periodic_tasks() {
+        workerApi.checkForPeriodicTasks();
+    },
 
     // Video
     js_did_open_video(width, height) {
@@ -42,6 +45,19 @@ mergeInto(LibraryManager.library, {
     },
     js_disk_write(diskId, bufPtr, offset, length) {
         return workerApi.disks.write(diskId, bufPtr, offset, length);
+    },
+    js_consume_cdrom_name() {
+        const diskName = workerApi.disks.consumeCdromName();
+        if (!diskName || !diskName.length) {
+            return 0;
+        }
+        const diskNameLength = lengthBytesUTF8(diskName) + 1;
+        const diskNameCstr = _malloc(diskNameLength);
+        stringToUTF8(diskName, diskNameCstr, diskNameLength);
+        return diskNameCstr;
+    },
+    js_free(ptr) {
+        _free(ptr);
     },
 
     // Input
