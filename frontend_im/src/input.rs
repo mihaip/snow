@@ -1,4 +1,4 @@
-use snow_core::emulator::comm::{EmulatorCommand, EmulatorCommandSender};
+use snow_core::emulator::comm::{EmulatorCommand, EmulatorCommandSender, EmulatorSpeed};
 use snow_core::emulator::MouseMode;
 use snow_core::keymap::{KeyEvent, Keymap};
 
@@ -24,6 +24,7 @@ impl Receiver {
 
         self.handle_mouse();
         self.handle_keyboard();
+        self.handle_speed();
 
         js_api::input::release_lock();
     }
@@ -76,6 +77,23 @@ impl Receiver {
             };
             let _ = self.cmd_sender.send(EmulatorCommand::KeyEvent(event));
         }
+    }
+
+    fn handle_speed(&self) {
+        let Some(speed_raw) = js_api::input::speed_event() else {
+            return;
+        };
+        let speed = match speed_raw {
+            -2 => EmulatorSpeed::Accurate,
+            7 => EmulatorSpeed::Dynamic,
+            -1 => EmulatorSpeed::Uncapped,
+            9 => EmulatorSpeed::Video,
+            speed => {
+                log::warn!("Ignoring unknown speed value: {}", speed);
+                return;
+            }
+        };
+        let _ = self.cmd_sender.send(EmulatorCommand::SetSpeed(speed));
     }
 }
 
