@@ -38,10 +38,10 @@ impl Receiver {
             });
         }
 
-        if js_api::input::has_mouse_position() {
+        if let Some(mouse_event) = js_api::input::mouse_event() {
             match self.mouse_mode {
                 MouseMode::RelativeHw => {
-                    let (mouse_delta_x, mouse_delta_y) = js_api::input::mouse_delta();
+                    let (mouse_delta_x, mouse_delta_y) = mouse_event.delta;
                     if mouse_delta_x != 0 || mouse_delta_y != 0 {
                         let relx = clamp_i32_to_i16(mouse_delta_x);
                         let rely = clamp_i32_to_i16(mouse_delta_y);
@@ -53,7 +53,7 @@ impl Receiver {
                     }
                 }
                 MouseMode::Absolute => {
-                    let (mouse_pos_x, mouse_pos_y) = js_api::input::mouse_position();
+                    let (mouse_pos_x, mouse_pos_y) = mouse_event.position;
                     let x = clamp_i32_to_u16(mouse_pos_x);
                     let y = clamp_i32_to_u16(mouse_pos_y);
                     let _ = self
@@ -66,17 +66,16 @@ impl Receiver {
     }
 
     fn handle_keyboard(&self) {
-        if js_api::input::has_key_event() {
-            let key_code = js_api::input::key_code();
-            let key_state = js_api::input::key_state();
-            let scancode = clamp_i32_to_u8(key_code);
-            let event = if key_state == 0 {
-                KeyEvent::KeyUp(scancode, Keymap::Universal)
-            } else {
-                KeyEvent::KeyDown(scancode, Keymap::Universal)
-            };
-            let _ = self.cmd_sender.send(EmulatorCommand::KeyEvent(event));
-        }
+        let Some(key_event) = js_api::input::key_event() else {
+            return;
+        };
+        let scancode = clamp_i32_to_u8(key_event.key_code);
+        let event = if key_event.key_state == 0 {
+            KeyEvent::KeyUp(scancode, Keymap::Universal)
+        } else {
+            KeyEvent::KeyDown(scancode, Keymap::Universal)
+        };
+        let _ = self.cmd_sender.send(EmulatorCommand::KeyEvent(event));
     }
 
     fn handle_speed(&self) {
