@@ -10,6 +10,8 @@ extern "C" {
     fn js_has_key_event() -> i32;
     fn js_get_key_code() -> i32;
     fn js_get_key_state() -> i32;
+    fn js_has_speed_event() -> i32;
+    fn js_get_speed() -> i32;
 }
 
 pub fn acquire_lock() -> bool {
@@ -53,4 +55,12 @@ pub fn key_code() -> i32 {
 
 pub fn key_state() -> i32 {
     unsafe { js_get_key_state() }
+}
+
+pub fn speed_event() -> Option<i32> {
+    if unsafe { js_has_speed_event() } == 0 {
+        None
+    } else {
+        Some(unsafe { js_get_speed() })
+    }
 }
