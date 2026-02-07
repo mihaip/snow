@@ -112,4 +112,12 @@ mergeInto(LibraryManager.library, {
             workerApi.InputBufferAddresses.keyStateAddr
         );
     },
+    js_has_speed_event() {
+        return workerApi.getInputValue(
+            workerApi.InputBufferAddresses.speedFlagAddr
+        );
+    },
+    js_get_speed() {
+        return workerApi.getInputValue(workerApi.InputBufferAddresses.speedAddr);
+    },
 });
