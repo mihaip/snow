@@ -14,6 +14,18 @@ extern "C" {
     fn js_get_speed() -> i32;
 }
 
+#[derive(Clone, Copy)]
+pub struct MouseEvent {
+    pub position: (i32, i32),
+    pub delta: (i32, i32),
+}
+
+#[derive(Clone, Copy)]
+pub struct KeyEvent {
+    pub key_code: i32,
+    pub key_state: i32,
+}
+
 pub fn acquire_lock() -> bool {
     unsafe { js_acquire_input_lock() != 0 }
 }
@@ -33,28 +45,26 @@ pub fn mouse_button_state() -> Option<bool> {
     }
 }
 
-pub fn has_mouse_position() -> bool {
-    unsafe { js_has_mouse_position() != 0 }
+pub fn mouse_event() -> Option<MouseEvent> {
+    if unsafe { js_has_mouse_position() } == 0 {
+        None
+    } else {
+        Some(MouseEvent {
+            position: unsafe { (js_get_mouse_x_position(), js_get_mouse_y_position()) },
+            delta: unsafe { (js_get_mouse_delta_x(), js_get_mouse_delta_y()) },
+        })
+    }
 }
 
-pub fn mouse_position() -> (i32, i32) {
-    unsafe { (js_get_mouse_x_position(), js_get_mouse_y_position()) }
-}
-
-pub fn mouse_delta() -> (i32, i32) {
-    unsafe { (js_get_mouse_delta_x(), js_get_mouse_delta_y()) }
-}
-
-pub fn has_key_event() -> bool {
-    unsafe { js_has_key_event() != 0 }
-}
-
-pub fn key_code() -> i32 {
-    unsafe { js_get_key_code() }
-}
-
-pub fn key_state() -> i32 {
-    unsafe { js_get_key_state() }
+pub fn key_event() -> Option<KeyEvent> {
+    if unsafe { js_has_key_event() } == 0 {
+        None
+    } else {
+        Some(KeyEvent {
+            key_code: unsafe { js_get_key_code() },
+            key_state: unsafe { js_get_key_state() },
+        })
+    }
 }
 
 pub fn speed_event() -> Option<i32> {
