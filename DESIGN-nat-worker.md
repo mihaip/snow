@@ -97,6 +97,96 @@ Object:
 3. Holds outbound TCP connections
 4. Runs a poll loop driven by incoming WebSocket messages and TCP data
 
+### WebSocket Hibernation
+
+The Durable Object uses Cloudflare's [WebSocket Hibernation API](https://developers.cloudflare.com/durable-objects/examples/websocket-hibernation-server/)
+to avoid billing for idle connections. This is critical for this use
+case: users will often have the emulator open but not be actively
+browsing the internet (e.g. using local applications, or just leaving
+the tab open). Without hibernation, the Durable Object would be billed
+for wall-clock duration the entire time the WebSocket is connected —
+potentially hours or days. With hibernation, the DO is only billed when
+it is actively processing traffic.
+
+**How it works:**
+
+1. The DO uses `this.ctx.acceptWebSocket(server)` instead of
+   `server.accept()`. This tells the runtime the WebSocket is
+   "hibernatable".
+2. Instead of adding event listeners on the WebSocket, the DO implements
+   `webSocketMessage()`, `webSocketClose()`, and `webSocketError()`
+   handler methods on the class.
+3. When no messages are flowing and no I/O is pending, the runtime
+   evicts the DO from memory. The WebSocket connection to the browser
+   stays open — Cloudflare's edge infrastructure holds it.
+4. When the browser sends a new WebSocket message (e.g. the Mac's
+   TCP/IP stack sends an Ethernet frame), the runtime recreates the DO
+   (runs the constructor), then delivers the message to
+   `webSocketMessage()`.
+
+**Lifecycle with NAT state:**
+
+```
+User browses the web in emulated Mac
+  → Ethernet frames flow over WebSocket
+  → DO is active: WASM NAT engine running, TCP connections open
+  → Billed for duration (this is expected — active work)
+
+User stops browsing, uses local Mac apps
+  → No more Ethernet frames sent
+  → Existing TCP connections time out (15 min max per NAT timeout)
+  → All outbound sockets close, no pending I/O
+  → DO hibernates: evicted from memory, $0 duration cost
+  → WebSocket stays open (held by Cloudflare edge)
+
+User opens a web browser again in the emulated Mac
+  → Mac TCP/IP stack sends ARP or DNS query → Ethernet frame
+  → WebSocket message arrives → DO wakes up
+  → Constructor runs, WASM NAT engine re-instantiated (fresh state)
+  → NAT processes the frame, new TCP connections established
+  → Everything works — Mac TCP/IP stack handles retransmission
+```
+
+The key insight is that NAT state is **ephemeral and reconstructable**.
+When the DO wakes from hibernation, the WASM NAT engine starts fresh
+(new `nat_new()`). This is fine because:
+
+- All TCP connections already timed out before hibernation (otherwise
+  pending I/O would have kept the DO alive)
+- The smoltcp gateway config (ARP, IP, routes) is stateless and
+  reconstructed on init
+- The Mac's TCP/IP stack is resilient — it retransmits, re-ARPs, and
+  re-resolves DNS as needed
+
+**Ping/pong keepalive without waking:**
+
+The DO uses `setWebSocketAutoResponse()` to handle WebSocket ping/pong
+automatically at the edge, without waking a hibernated DO:
+
+```typescript
+constructor(ctx: DurableObjectState, env: Env) {
+  this.ctx.setWebSocketAutoResponse(
+    new WebSocketRequestResponsePair("ping", "pong")
+  );
+}
+```
+
+This means the browser-side keepalive pings do not incur any duration
+charges. The browser can maintain its WebSocket connection indefinitely
+at near-zero cost.
+
+**Billing impact:**
+
+| Scenario | Without Hibernation | With Hibernation |
+|---|---|---|
+| User actively browsing (1 hr) | 1 hr duration billed | 1 hr duration billed (same) |
+| Tab open, Mac idle (8 hrs) | 8 hrs duration billed | ~0 duration billed |
+| Tab open overnight (12 hrs, 1 hr active) | 13 hrs billed | ~1 hr billed |
+| WebSocket messages | Per-request billing | 20:1 ratio (100 msgs = 5 requests) |
+
+For a typical session where the emulator is open for hours but internet
+usage is sporadic, hibernation can reduce duration costs by 80-90%.
+
 ### Why WASM (not reimplementing in TypeScript)
 
 - smoltcp is ~15k lines of battle-tested TCP/IP implementation
@@ -251,29 +341,79 @@ NAT module, and Cloudflare's `connect()` API.
 #### Pseudocode
 
 ```typescript
-export class NatSession implements DurableObject {
-  private nat: NatWasm;                  // WASM module instance
-  private ws: WebSocket | null = null;
+export class NatSession extends DurableObject {
+  private nat: NatWasm | null = null;     // WASM module instance (lazily initialized)
   private tcpSockets: Map<number, Socket> = new Map();
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Auto-respond to keepalive pings without waking from hibernation.
+    // The browser sends "ping" periodically; the edge replies "pong"
+    // without incurring any duration charges.
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair("ping", "pong")
+    );
+  }
 
   async fetch(request: Request): Promise<Response> {
     // WebSocket upgrade
     const [client, server] = Object.values(new WebSocketPair());
-    this.ws = server;
-    server.accept();
 
-    this.nat = await instantiateNat(this.importObject());
-    this.nat.nat_new();
+    // Use acceptWebSocket() instead of accept() to enable hibernation.
+    // The runtime knows this WebSocket is hibernatable and will evict
+    // the DO from memory when idle, while keeping the connection open.
+    this.ctx.acceptWebSocket(server);
 
-    server.addEventListener("message", (event) => {
-      // Binary WebSocket message = one raw Ethernet frame
-      const frame = new Uint8Array(event.data as ArrayBuffer);
-      // Copy into WASM memory, call nat_receive, then nat_process
-      this.feedFrame(frame);
-      this.processAndFlush();
-    });
+    // Initialize the NAT engine for this connection
+    await this.ensureNat();
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // --- Hibernation-aware WebSocket handlers ---
+  // These replace addEventListener("message"/etc.) and are called by
+  // the runtime, including after waking from hibernation.
+
+  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
+    // Binary WebSocket message = one raw Ethernet frame
+    if (!(message instanceof ArrayBuffer)) return;
+
+    // Lazily re-initialize the NAT engine if waking from hibernation.
+    // After hibernation, the constructor ran but the WASM module and
+    // all NAT state are gone. That's fine — the Mac's TCP/IP stack
+    // will re-ARP, re-resolve DNS, and retransmit as needed.
+    await this.ensureNat();
+
+    const frame = new Uint8Array(message);
+    this.feedFrame(frame);
+    this.processAndFlush(ws);
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+    // Browser disconnected. Clean up all outbound TCP connections.
+    this.cleanup();
+    ws.close(code, reason);
+  }
+
+  async webSocketError(ws: WebSocket, error: unknown) {
+    this.cleanup();
+    ws.close(1011, "WebSocket error");
+  }
+
+  // --- NAT engine lifecycle ---
+
+  private async ensureNat() {
+    if (this.nat) return;
+    this.nat = await instantiateNat(this.importObject());
+    this.nat.nat_new();
+  }
+
+  private cleanup() {
+    for (const [connId, socket] of this.tcpSockets) {
+      socket.close();
+    }
+    this.tcpSockets.clear();
+    this.nat = null;
   }
 
   private importObject(): WebAssembly.Imports {
@@ -304,15 +444,21 @@ export class NatSession implements DurableObject {
     };
   }
 
+  // Helper: get the WebSocket for sending frames back to the browser.
+  // After hibernation, getWebSockets() returns the surviving connections.
+  private getClientWebSocket(): WebSocket | null {
+    const sockets = this.ctx.getWebSockets();
+    return sockets.length > 0 ? sockets[0] : null;
+  }
+
   private async openTcpConnection(connId: number, ip: string, port: number) {
     try {
       const socket = connect({ hostname: ip, port });
       this.tcpSockets.set(connId, socket);
-      this.nat.nat_tcp_connected(connId);
-      // Start reading from the socket
+      this.nat!.nat_tcp_connected(connId);
       this.readTcpSocket(connId, socket);
     } catch (e) {
-      this.nat.nat_tcp_closed(connId);
+      this.nat!.nat_tcp_closed(connId);
     }
     this.processAndFlush();
   }
@@ -324,10 +470,10 @@ export class NatSession implements DurableObject {
         { secureTransport: "on", serverName: hostname }
       );
       this.tcpSockets.set(connId, socket);
-      this.nat.nat_tcp_connected(connId);
+      this.nat!.nat_tcp_connected(connId);
       this.readTcpSocket(connId, socket);
     } catch (e) {
-      this.nat.nat_tcp_closed(connId);
+      this.nat!.nat_tcp_closed(connId);
     }
     this.processAndFlush();
   }
@@ -338,12 +484,11 @@ export class NatSession implements DurableObject {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        // Copy value into WASM memory and call nat_tcp_data
-        this.nat.nat_tcp_data(connId, value);
+        this.nat!.nat_tcp_data(connId, value);
         this.processAndFlush();
       }
     } finally {
-      this.nat.nat_tcp_closed(connId);
+      this.nat!.nat_tcp_closed(connId);
       this.tcpSockets.delete(connId);
       this.processAndFlush();
     }
@@ -359,22 +504,23 @@ export class NatSession implements DurableObject {
       const answer = json.Answer?.find(a => a.type === 1); // A record
       if (answer) {
         const [a, b, c, d] = answer.data.split(".").map(Number);
-        this.nat.nat_dns_resolved(queryId, a, b, c, d);
+        this.nat!.nat_dns_resolved(queryId, a, b, c, d);
       } else {
-        this.nat.nat_dns_resolved(queryId, 0, 0, 0, 0);
+        this.nat!.nat_dns_resolved(queryId, 0, 0, 0, 0);
       }
     } catch {
-      this.nat.nat_dns_resolved(queryId, 0, 0, 0, 0);
+      this.nat!.nat_dns_resolved(queryId, 0, 0, 0, 0);
     }
     this.processAndFlush();
   }
 
-  private processAndFlush() {
-    const frameCount = this.nat.nat_process();
+  private processAndFlush(ws?: WebSocket) {
+    const target = ws ?? this.getClientWebSocket();
+    const frameCount = this.nat!.nat_process();
     for (let i = 0; i < frameCount; i++) {
-      const frame = this.nat.nat_get_tx_frame();
-      if (frame && this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(frame);
+      const frame = this.nat!.nat_get_tx_frame();
+      if (frame && target) {
+        target.send(frame);
       }
     }
   }
@@ -547,6 +693,7 @@ targeting the gateway.
 | Outbound UDP | Not available | DoH for DNS; no general UDP |
 | Outbound TLS | `connect()` with `secureTransport` | Direct use (replaces rustls) |
 | WebSocket server | Via Durable Objects | One DO per emulator session |
+| WebSocket Hibernation | `ctx.acceptWebSocket()` + handler methods | DO evicted when idle; $0 duration cost while hibernated |
 | WASM modules | Supported | Compile NAT to `wasm32-unknown-unknown` |
 | CPU time | 30s per request; no limit on DO with WebSocket | Fine for event-driven NAT |
 | Memory | 128 MB per DO | Plenty for NAT table + smoltcp |

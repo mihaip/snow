@@ -127,12 +127,30 @@ A Cloudflare Worker that:
    - Worker sends: binary WS message = one raw Ethernet frame
    - Keepalive: WebSocket pings (handled by Cloudflare automatically)
 
-**Alternative: Durable Objects** — If per-connection state (the NAT table) needs to survive Worker restarts, use a Durable Object per session. However, for a stateless NAT with short-lived connections, a plain Worker with WebSocket should suffice since the Mac TCP/IP stack will retransmit on connection loss.
+**Durable Objects with WebSocket Hibernation** — A Durable Object per
+session provides persistent WebSocket connections and mutable state.
+The [WebSocket Hibernation API](https://developers.cloudflare.com/durable-objects/examples/websocket-hibernation-server/)
+is used to avoid paying for idle time: when the user is not actively
+using the internet in the emulated Mac, the DO is evicted from memory
+(zero duration cost) while the WebSocket stays open. When the Mac
+sends the next Ethernet frame, the DO wakes up, re-instantiates the
+WASM NAT engine, and resumes. NAT state is ephemeral — the Mac's
+TCP/IP stack handles retransmission after wake. See `DESIGN-nat-worker.md`
+for the full hibernation lifecycle.
 
 **DNS handling:** Classic Mac OS typically uses UDP-based DNS. Since Workers can't do outbound UDP, the NAT engine in the Worker should intercept DNS queries (UDP port 53) and proxy them via `fetch()` to a DNS-over-HTTPS endpoint (e.g., `https://1.1.1.1/dns-query`). This is a small addition to the NAT engine.
 
-**Cost considerations (Cloudflare Workers):**
-- Workers are billed on CPU time, not wall clock time
+**Cost considerations (Cloudflare Workers/Durable Objects):**
+- Duration: billed for wall-clock time the DO is actively running.
+  With WebSocket Hibernation, idle periods cost $0 — only active
+  browsing incurs duration charges. For a typical session (emulator
+  open for hours, internet used sporadically), this reduces duration
+  costs by 80-90%.
+- Requests: WebSocket messages use a 20:1 billing ratio (100 incoming
+  messages = 5 billed requests), favorable for small Ethernet frames.
+- Ping/pong: `setWebSocketAutoResponse()` handles keepalive at the
+  edge without waking the DO — no charges for maintaining the
+  connection.
 - Each Ethernet frame transit costs minimal CPU (just relaying bytes)
 - The NAT engine's smoltcp processing adds some overhead per packet
 - For casual retro web browsing, costs should be negligible
@@ -271,7 +289,7 @@ This means the relay server acts as the "bridge Mac" that GlobalTalk participant
 | Risk | Impact | Mitigation |
 |---|---|---|
 | **Workers can't do UDP** | No DNS resolution in Mac OS | Intercept DNS in NAT engine, proxy via DoH |
-| **Workers CPU time limits** | Long browsing sessions could hit limits | Durable Objects for persistent connections; keep NAT processing efficient |
+| **Workers CPU time limits** | Long browsing sessions could hit limits | Durable Objects with WebSocket Hibernation for persistent connections at near-zero idle cost; keep NAT processing efficient |
 | **WebSocket latency** | Slow page loads in emulated browsers | Cloudflare edge is close to users; classic web pages are small |
 | **smoltcp in Workers WASM** | May need porting effort for `no_std`-like environment | smoltcp already supports `no_std`; main work is replacing OS socket calls |
 | **GlobalTalk participation requires static IP** | AIR needs known IPs for tunnel config | Use a dedicated VPS with static IP for the relay |
