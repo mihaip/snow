@@ -33,6 +33,56 @@ type BasicPacket = Vec<u8>;
 /// Maximum amount of packets to buffer in the RX/TX queues
 const PACKET_QUEUE_SIZE: usize = 512;
 
+/// Abstraction over the physical network backend for the Daynaport
+/// SCSI/Link Ethernet adapter.
+///
+/// Implementations are injected by the frontend, following the same
+/// pattern as `AudioSink` and `DiskImage`.
+pub trait EthernetBackend: Send {
+    /// Send a packet from the emulated Mac to the network.
+    fn send(&mut self, packet: &[u8]) -> Result<()>;
+
+    /// Check whether any packets are waiting to be received.
+    fn has_pending(&self) -> bool;
+
+    /// Try to receive the next packet from the network.
+    /// Returns `None` if no packet is available.
+    fn try_recv(&mut self) -> Option<Vec<u8>>;
+}
+
+/// Default crossbeam-channel-backed Ethernet backend.
+/// Used as a bridge between the emulator and backend threads
+/// (NAT engine, TAP bridge, raw bridge).
+pub struct ChannelEthernetBackend {
+    tx: crossbeam_channel::Sender<Vec<u8>>,
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+}
+
+impl ChannelEthernetBackend {
+    pub fn new(
+        tx: crossbeam_channel::Sender<Vec<u8>>,
+        rx: crossbeam_channel::Receiver<Vec<u8>>,
+    ) -> Self {
+        Self { tx, rx }
+    }
+}
+
+impl EthernetBackend for ChannelEthernetBackend {
+    fn send(&mut self, packet: &[u8]) -> Result<()> {
+        self.tx
+            .try_send(packet.to_owned())
+            .map_err(|e| anyhow::anyhow!("Failed to send packet: {:?}", e))
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.rx.is_empty()
+    }
+
+    fn try_recv(&mut self) -> Option<Vec<u8>> {
+        self.rx.try_recv().ok()
+    }
+}
+
 /// Link mode for ethernet device
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum EthernetLinkType {
@@ -97,13 +147,9 @@ pub(crate) struct ScsiTargetEthernet {
     /// MAC address
     macaddress: [u8; 6],
 
-    /// Transmit queue (Mac -> network)
+    /// Network backend (injected by frontend)
     #[serde(skip)]
-    tx: Option<crossbeam_channel::Sender<BasicPacket>>,
-
-    /// Receive queue (network -> Mac)
-    #[serde(skip)]
-    rx: Option<crossbeam_channel::Receiver<BasicPacket>>,
+    backend: Option<Box<dyn EthernetBackend>>,
 
     /// Link type
     #[serde(skip)]
@@ -150,8 +196,7 @@ impl Default for ScsiTargetEthernet {
                 rand.random(),
                 rand.random(),
             ],
-            tx: None,
-            rx: None,
+            backend: None,
             link: Default::default(),
             #[cfg(feature = "ethernet_nat")]
             nat_stats: None,
@@ -167,7 +212,7 @@ impl Default for ScsiTargetEthernet {
 
 impl ScsiTargetEthernet {
     fn tx_packet(&mut self, packet: &[u8]) {
-        if self.rx.is_none() && self.tx.is_none() && self.link != EthernetLinkType::Down {
+        if self.backend.is_none() && self.link != EthernetLinkType::Down {
             // Initialize link
             let link = self.link.clone();
             if let Err(e) = self.eth_set_link(link) {
@@ -175,10 +220,9 @@ impl ScsiTargetEthernet {
             }
         }
 
-        if let Some(ref tx) = self.tx {
-            match tx.try_send(packet.to_owned()) {
-                Ok(_) => {}
-                Err(e) => log::error!("Failed to send packet {:?}", e),
+        if let Some(ref mut backend) = self.backend {
+            if let Err(e) = backend.send(packet) {
+                log::error!("Failed to send packet: {}", e);
             }
         }
     }
@@ -206,8 +250,7 @@ impl ScsiTargetEthernet {
 
         let (bridge_tx, emulator_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
         let (emulator_tx, bridge_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
-        self.tx = Some(emulator_tx);
-        self.rx = Some(emulator_rx);
+        self.backend = Some(Box::new(ChannelEthernetBackend::new(emulator_tx, emulator_rx)));
 
         let bridge_config = pnet::datalink::Config {
             promiscuous: true,
@@ -364,8 +407,7 @@ impl ScsiTargetEthernet {
 
         let (bridge_tx, emulator_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
         let (emulator_tx, bridge_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
-        self.tx = Some(emulator_tx);
-        self.rx = Some(emulator_rx);
+        self.backend = Some(Box::new(ChannelEthernetBackend::new(emulator_tx, emulator_rx)));
 
         let (mut reader, mut writer) = dev.split();
 
@@ -633,12 +675,12 @@ impl ScsiTarget for ScsiTargetEthernet {
                     return Ok(ScsiCmdResult::Status(STATUS_CHECK_CONDITION));
                 }
 
-                let Some(rx) = self.rx.as_ref() else {
+                let Some(backend) = self.backend.as_mut() else {
                     // Link down
                     return Ok(ScsiCmdResult::DataIn(vec![0; 6]));
                 };
 
-                if rx.is_empty() {
+                if !backend.has_pending() {
                     // No data
                     return Ok(ScsiCmdResult::DataIn(vec![0; 6]));
                 }
@@ -646,9 +688,11 @@ impl ScsiTarget for ScsiTargetEthernet {
                 let mut response = vec![];
                 let mut packet_count = 0;
                 loop {
-                    let packet = rx.try_recv()?;
+                    let Some(packet) = backend.try_recv() else {
+                        break;
+                    };
                     packet_count += 1;
-                    let more = !rx.is_empty() && packet_count < MAX_PACKETS_PER_READ;
+                    let more = backend.has_pending() && packet_count < MAX_PACKETS_PER_READ;
                     let packet_len = packet.len().max(64);
                     let frame_len = packet_len + 4; // FCS
                     let resp_len = 6 + frame_len;
@@ -761,8 +805,8 @@ impl ScsiTarget for ScsiTargetEthernet {
 
                 if !self.enabled && enable {
                     // Drain RX queue
-                    if let Some(rx) = &self.rx {
-                        while rx.try_recv().is_ok() {}
+                    if let Some(backend) = &mut self.backend {
+                        while backend.try_recv().is_some() {}
                     }
                 }
 
@@ -776,9 +820,8 @@ impl ScsiTarget for ScsiTargetEthernet {
 
     fn eth_set_link(&mut self, link: EthernetLinkType) -> Result<()> {
         // Terminate active links
-        // Dropping the senders will cause the channel to close and the receiver threads to terminate
-        self.rx = None;
-        self.tx = None;
+        // Dropping the backend will cause channels to close and receiver threads to terminate
+        self.backend = None;
         #[cfg(feature = "ethernet_nat")]
         {
             self.nat_stats = None;
@@ -817,8 +860,8 @@ impl ScsiTarget for ScsiTargetEthernet {
                     #[cfg(feature = "ethernet_nat_https_stripping")]
                     false,
                 );
-                self.rx = Some(emulator_rx);
-                self.tx = Some(emulator_tx);
+                self.backend =
+                    Some(Box::new(ChannelEthernetBackend::new(emulator_tx, emulator_rx)));
                 self.nat_stats = Some(nat.stats());
                 std::thread::spawn(move || {
                     nat.run();
@@ -837,8 +880,8 @@ impl ScsiTarget for ScsiTargetEthernet {
                     8,
                     true, // Enable HTTPS stripping
                 );
-                self.rx = Some(emulator_rx);
-                self.tx = Some(emulator_tx);
+                self.backend =
+                    Some(Box::new(ChannelEthernetBackend::new(emulator_tx, emulator_rx)));
                 self.nat_stats = Some(nat.stats());
                 std::thread::spawn(move || {
                     nat.run();
@@ -847,6 +890,10 @@ impl ScsiTarget for ScsiTargetEthernet {
         }
         self.link = link;
         Ok(())
+    }
+
+    fn eth_set_backend(&mut self, backend: Box<dyn EthernetBackend>) {
+        self.backend = Some(backend);
     }
 
     fn eth_link(&self) -> Option<EthernetLinkType> {
@@ -877,12 +924,7 @@ impl Debuggable for ScsiTargetEthernet {
             dbgprop_bool!("Interface enabled", self.enabled),
         ];
 
-        if let Some(tx) = &self.tx {
-            result.push(dbgprop_udec!("TX queue length", tx.len()));
-        }
-        if let Some(rx) = &self.rx {
-            result.push(dbgprop_udec!("RX queue length", rx.len()));
-        }
+        result.push(dbgprop_bool!("Backend active", self.backend.is_some()));
         result.push(dbgprop_group!(
             "Multicast groups",
             Vec::from_iter(self.multicast_groups.read().unwrap().iter().map(
@@ -1012,9 +1054,10 @@ mod tests {
         // Create a ScsiTargetEthernet instance
         let mut eth = ScsiTargetEthernet::default();
 
-        // Create channels for testing
-        let (tx, rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
-        eth.rx = Some(rx);
+        // Create channels for testing and wrap in ChannelEthernetBackend
+        let (tx, emulator_rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
+        let (emulator_tx, _rx) = crossbeam_channel::bounded(PACKET_QUEUE_SIZE);
+        eth.backend = Some(Box::new(ChannelEthernetBackend::new(emulator_tx, emulator_rx)));
 
         // Send 10 test packets to the RX queue
         for i in 0..10 {
@@ -1082,10 +1125,9 @@ mod tests {
             }
 
             // Verify 2 packets remain in the queue
-            assert_eq!(
-                eth.rx.as_ref().unwrap().len(),
-                2,
-                "Expected 2 packets remaining in queue"
+            assert!(
+                eth.backend.as_ref().unwrap().has_pending(),
+                "Expected packets remaining in queue"
             );
         } else {
             panic!("Expected DataIn result");

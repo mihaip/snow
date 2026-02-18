@@ -767,6 +767,17 @@ impl Emulator {
         info!("SCSI ID #{}: Ethernet controller attached", id);
     }
 
+    #[cfg(feature = "ethernet")]
+    pub fn set_ethernet_backend(
+        &mut self,
+        scsi_id: usize,
+        backend: Box<dyn crate::mac::scsi::ethernet::EthernetBackend>,
+    ) {
+        if let Some(target) = self.config.scsi_mut().targets[scsi_id].as_mut() {
+            target.eth_set_backend(backend);
+        }
+    }
+
     #[cfg(feature = "savestates")]
     fn save_state(&self, p: &Path, screenshot: Option<Vec<u8>>) -> Result<()> {
         let mut f = File::create(p)?;

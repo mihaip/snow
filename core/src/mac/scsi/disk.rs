@@ -269,6 +269,11 @@ impl ScsiTarget for ScsiTargetDisk {
     }
 
     #[cfg(feature = "ethernet")]
+    fn eth_set_backend(&mut self, _backend: Box<dyn super::ethernet::EthernetBackend>) {
+        unreachable!()
+    }
+
+    #[cfg(feature = "ethernet")]
     fn eth_link(&self) -> Option<super::ethernet::EthernetLinkType> {
         None
     }

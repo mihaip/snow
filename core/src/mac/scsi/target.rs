@@ -47,6 +47,8 @@ pub(crate) trait ScsiTarget: Send + Debuggable {
     #[cfg(feature = "ethernet")]
     fn eth_set_link(&mut self, link: super::ethernet::EthernetLinkType) -> Result<()>;
     #[cfg(feature = "ethernet")]
+    fn eth_set_backend(&mut self, backend: Box<dyn super::ethernet::EthernetBackend>);
+    #[cfg(feature = "ethernet")]
     fn eth_link(&self) -> Option<super::ethernet::EthernetLinkType>;
 
     /// Request sense result (code, asc, ascq)
