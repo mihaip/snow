@@ -677,6 +677,16 @@ impl Emulator {
         self.config.set_audio_sink(sink);
     }
 
+    /// Inject a LocalTalk backend on SCC channel B, replacing the default
+    /// UDP multicast backend. Call before starting the emulator run loop.
+    pub fn set_localtalk_backend(
+        &mut self,
+        backend: Box<dyn crate::mac::localtalk_bridge::LocalTalkBackend>,
+    ) {
+        self.serial_bridges[1] =
+            Some(crate::mac::serial_bridge::SccBridge::LocalTalk(backend));
+    }
+
     pub fn load_hdd_image(&mut self, filename: &Path, scsi_id: usize) -> Result<()> {
         self.config.scsi_mut().attach_hdd_at(filename, scsi_id)
     }

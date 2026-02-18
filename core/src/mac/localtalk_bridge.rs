@@ -87,6 +87,25 @@ impl std::fmt::Display for LocalTalkStatus {
     }
 }
 
+/// Abstraction over the LocalTalk network backend for the SCC Channel B bridge.
+///
+/// Implementations are injected by the frontend, following the same pattern as
+/// `AudioSink`, `DiskImage`, and `EthernetBackend`.
+pub trait LocalTalkBackend: Send {
+    /// Write LLAP frame bytes from the SCC TX path to the network
+    fn write_from_scc(&mut self, data: &[u8]);
+
+    /// Read the next LLAP frame to inject into the SCC RX path.
+    /// Returns None if nothing is available yet.
+    fn read_to_scc(&mut self) -> Option<Vec<u8>>;
+
+    /// Poll for incoming packets. Returns true if state changed.
+    fn poll(&mut self) -> bool;
+
+    /// Get current bridge status
+    fn status(&self) -> LocalTalkStatus;
+}
+
 /// LocalTalk over UDP bridge
 pub struct LocalTalkBridge {
     /// UDP socket for multicast communication
@@ -370,6 +389,24 @@ impl LocalTalkBridge {
                 self.handle_tx_packet(&packet);
             }
         }
+    }
+}
+
+impl LocalTalkBackend for LocalTalkBridge {
+    fn write_from_scc(&mut self, data: &[u8]) {
+        self.write_from_scc(data);
+    }
+
+    fn read_to_scc(&mut self) -> Option<Vec<u8>> {
+        self.read_to_scc()
+    }
+
+    fn poll(&mut self) -> bool {
+        self.poll()
+    }
+
+    fn status(&self) -> LocalTalkStatus {
+        self.status()
     }
 }
 

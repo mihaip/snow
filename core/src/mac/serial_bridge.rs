@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use log::*;
 use serde::{Deserialize, Serialize};
 
-use super::localtalk_bridge::LocalTalkStatus;
+use super::localtalk_bridge::{LocalTalkBackend, LocalTalkStatus};
 
 /// Configuration for a serial bridge
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,17 +384,18 @@ impl SerialBridge {
 pub enum SccBridge {
     /// Serial bridge (PTY or TCP)
     Serial(SerialBridge),
-    /// LocalTalk over UDP
-    LocalTalk(super::localtalk_bridge::LocalTalkBridge),
+    /// LocalTalk — backend is injected by the frontend
+    LocalTalk(Box<dyn LocalTalkBackend>),
 }
 
 impl SccBridge {
-    /// Create a new bridge with the given configuration
+    /// Create a new bridge with the given configuration using the default
+    /// native backends (UDP multicast for LocalTalk, PTY/TCP for serial).
     pub fn new(config: &SerialBridgeConfig) -> io::Result<Self> {
         match config {
-            SerialBridgeConfig::LocalTalk => Ok(Self::LocalTalk(
+            SerialBridgeConfig::LocalTalk => Ok(Self::LocalTalk(Box::new(
                 super::localtalk_bridge::LocalTalkBridge::new()?,
-            )),
+            ))),
             _ => Ok(Self::Serial(SerialBridge::new(config)?)),
         }
     }

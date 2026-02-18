@@ -28,8 +28,6 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, RwLock};
 
-type BasicPacket = Vec<u8>;
-
 /// Maximum amount of packets to buffer in the RX/TX queues
 const PACKET_QUEUE_SIZE: usize = 512;
 
