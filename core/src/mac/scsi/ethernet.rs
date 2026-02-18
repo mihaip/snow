@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, RwLock};
 
 /// Maximum amount of packets to buffer in the RX/TX queues
+#[allow(dead_code)]
 const PACKET_QUEUE_SIZE: usize = 512;
 
 /// Abstraction over the physical network backend for the Daynaport
@@ -902,9 +903,9 @@ impl ScsiTarget for ScsiTargetEthernet {
 impl Debuggable for ScsiTargetEthernet {
     fn get_debug_properties(&self) -> crate::debuggable::DebuggableProperties {
         use crate::debuggable::*;
-        use crate::{dbgprop_bool, dbgprop_string, dbgprop_udec};
+        use crate::{dbgprop_bool, dbgprop_group, dbgprop_string};
         #[cfg(feature = "ethernet_nat")]
-        use crate::{dbgprop_group, dbgprop_str};
+        use crate::{dbgprop_str, dbgprop_udec};
 
         let mut result = vec![
             dbgprop_string!(

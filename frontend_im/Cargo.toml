@@ -8,7 +8,7 @@ name = "snow"
 path = "src/main.rs"
 
 [dependencies]
-snow_core = { path = "../core" }
+snow_core = { path = "../core", features = ["ethernet"] }
 snow_floppy = { path = "../floppy" }
 crossbeam-channel = "0.5.15"
 log = "0.4"

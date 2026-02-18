@@ -120,4 +120,29 @@ mergeInto(LibraryManager.library, {
     js_get_speed() {
         return workerApi.getInputValue(workerApi.InputBufferAddresses.speedAddr);
     },
+
+    // Network (WebSocket relay for Ethernet)
+    // These stubs delegate to workerApi.network, which must be implemented in the
+    // Infinite Mac repo. The JS side is responsible for managing WebSocket connections
+    // and maintaining a per-handle queue of received Ethernet frames.
+    js_ws_connect(urlPtr, urlLen) {
+        const url = UTF8ToString(urlPtr, urlLen);
+        return workerApi.network.connect(url);
+    },
+    js_ws_send(handle, bufPtr, bufLen) {
+        workerApi.network.send(handle, HEAPU8.slice(bufPtr, bufPtr + bufLen));
+    },
+    js_ws_has_pending(handle) {
+        return workerApi.network.hasPending(handle) ? 1 : 0;
+    },
+    js_ws_recv(handle, bufPtr, bufCapacity) {
+        const data = workerApi.network.recv(handle);
+        if (!data) return 0;
+        if (data.length > bufCapacity) return -1;
+        HEAPU8.set(data, bufPtr);
+        return data.length;
+    },
+    js_ws_close(handle) {
+        workerApi.network.close(handle);
+    },
 });

@@ -14,6 +14,7 @@ mod floppy;
 mod framebuffer;
 mod input;
 mod js_api;
+mod network;
 
 fn main() {
     env_logger::Builder::new()
@@ -30,6 +31,8 @@ fn main() {
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
     let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
+    let network_relay_url: Option<String> =
+        args.opt_value_from_str("--network-relay").unwrap_or(None);
     let mouse_mode = if args.contains("--use-mouse-deltas") {
         MouseMode::RelativeHw
     } else {
@@ -108,6 +111,29 @@ fn main() {
     if cdrom_manager.is_some() {
         next_scsi_id += 1;
     }
+
+    // Attach Ethernet adapter if a relay URL was provided. The adapter occupies
+    // the next available SCSI ID after disks and CD-ROMs. Infinite Mac passes
+    // this ID in the disk image configuration so Mac OS can find the device.
+    if let Some(ref url) = network_relay_url {
+        let ethernet_scsi_id = next_scsi_id;
+        emulator.attach_ethernet(ethernet_scsi_id);
+        match network::WsEthernetBackend::new(url) {
+            Some(backend) => {
+                emulator.set_ethernet_backend(ethernet_scsi_id, Box::new(backend));
+                log::info!(
+                    "Ethernet attached at SCSI ID {} with relay {}",
+                    ethernet_scsi_id,
+                    url
+                );
+                next_scsi_id += 1;
+            }
+            None => {
+                log::error!("Failed to open network relay WebSocket, Ethernet not available");
+            }
+        }
+    }
+
     log::info!("Initialized {} SCSI devices", next_scsi_id);
 
     let cmd_sender = emulator.create_cmd_sender();
