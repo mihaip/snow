@@ -147,6 +147,9 @@ fn main() {
         while let Ok(event) = event_recv.try_recv() {
             match event {
                 EmulatorEvent::Status(status) => {
+                    js_api::runtime::update_emulator_stats(&js_api::runtime::EmulatorStats {
+                        effective_speed: Some(status.effective_speed),
+                    });
                     last_status = Some(status);
                 }
                 _ => {}

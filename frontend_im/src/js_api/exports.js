@@ -10,6 +10,14 @@ mergeInto(LibraryManager.library, {
     js_check_for_periodic_tasks() {
         workerApi.checkForPeriodicTasks();
     },
+    js_update_emulator_stats_json(statsJsonPtr) {
+        const statsJson = UTF8ToString(statsJsonPtr);
+        try {
+            workerApi.updateEmulatorStats(JSON.parse(statsJson));
+        } catch (error) {
+            console.warn("Could not parse emulator stats", statsJson, error);
+        }
+    },
 
     // Video
     js_did_open_video(width, height) {
@@ -118,6 +126,8 @@ mergeInto(LibraryManager.library, {
         );
     },
     js_get_speed() {
-        return workerApi.getInputValue(workerApi.InputBufferAddresses.speedAddr);
+        return workerApi.getInputValue(
+            workerApi.InputBufferAddresses.speedAddr
+        );
     },
 });
