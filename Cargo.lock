@@ -5061,6 +5061,8 @@ dependencies = [
  "env_logger",
  "log",
  "pico-args",
+ "serde",
+ "serde_json",
  "snow_core",
  "snow_floppy",
 ]
