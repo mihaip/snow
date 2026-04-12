@@ -9,11 +9,13 @@ use crate::cdrom::CdromManager;
 
 mod audio;
 mod cdrom;
+mod clipboard;
 mod disk;
 mod floppy;
 mod framebuffer;
 mod input;
 mod js_api;
+mod memory;
 
 fn main() {
     env_logger::Builder::new()
@@ -142,6 +144,8 @@ fn main() {
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
     let input_receiver = input::Receiver::new(cmd_sender, mouse_mode);
+    let mut memory_mirror = memory::MemoryMirror::new();
+    let mut clipboard_sync = clipboard::ClipboardSync::new();
     let mut last_status: Option<Box<EmulatorStatus>> = None;
     loop {
         js_api::runtime::check_for_periodic_tasks();
@@ -155,8 +159,16 @@ fn main() {
                     });
                     last_status = Some(status);
                 }
+                EmulatorEvent::Memory((addr, data, size)) => {
+                    memory_mirror.update(addr, &data, size);
+                }
                 _ => {}
             }
+        }
+
+        if let Some(update) = clipboard_sync.tick(&memory_mirror) {
+            log::info!("Updating host clipboard from emulator scrap");
+            js_api::clipboard::set_text(&update.text);
         }
 
         if let Some(cdrom_manager) = cdrom_manager.as_mut() {
