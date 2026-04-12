@@ -142,7 +142,8 @@ fn main() {
     cmd_sender.send(EmulatorCommand::Run).unwrap();
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
-    let input_receiver = input::Receiver::new(cmd_sender, mouse_mode);
+    let input_receiver = input::Receiver::new(cmd_sender.clone(), mouse_mode);
+    let mut last_clipboard_text = None;
     let mut last_status: Option<Box<EmulatorStatus>> = None;
     loop {
         js_api::runtime::check_for_periodic_tasks();
@@ -155,6 +156,14 @@ fn main() {
                         effective_speed: Some(status.effective_speed),
                     });
                     last_status = Some(status);
+                    cmd_sender.send(EmulatorCommand::ReadScrapText).unwrap();
+                }
+                EmulatorEvent::ScrapText(Some(text))
+                    if !text.is_empty() && last_clipboard_text.as_ref() != Some(&text) =>
+                {
+                    log::info!("Updating host clipboard from emulator scrap");
+                    js_api::clipboard::set_text(&text);
+                    last_clipboard_text = Some(text);
                 }
                 _ => {}
             }
