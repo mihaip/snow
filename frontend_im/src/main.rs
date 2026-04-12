@@ -85,7 +85,6 @@ fn main() {
         None,
     )
     .expect("Failed to create emulator");
-    emulator.set_audio_sink(Box::new(audio::JsAudioSink::new()));
 
     let mut next_scsi_id = 0;
     for disk_name in disk_names {
@@ -108,6 +107,10 @@ fn main() {
     if cdrom_manager.is_some() {
         next_scsi_id += 1;
     }
+    let mut audio_provider = audio::JsAudioProvider::new();
+    emulator
+        .set_audio_provider(&mut audio_provider)
+        .expect("Failed to initialize audio");
     log::info!("Initialized {} SCSI devices", next_scsi_id);
 
     let cmd_sender = emulator.create_cmd_sender();
@@ -160,7 +163,7 @@ fn main() {
             cdrom_manager.tick(&mut emulator, last_status.as_deref());
         }
 
-        if let Err(e) = emulator.tick(1) {
+        if let Err(e) = emulator.tick(1, ()) {
             log::error!("Emulator tick error: {:?}", e);
             break;
         }
