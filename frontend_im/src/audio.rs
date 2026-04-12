@@ -1,36 +1,77 @@
 use anyhow::Result;
-use snow_core::renderer::{AudioBuffer, AudioSink, AUDIO_BUFFER_SIZE, AUDIO_QUEUE_LEN};
+use snow_core::renderer::{
+    null_audio_sink, AudioBuffer, AudioProvider, AudioSink, AUDIO_QUEUE_LEN,
+};
 
 use crate::js_api;
 
-// Matches the configuration in SDLAudioSink (and thus the monitor horizontal
-// sync rate)
-const SAMPLE_RATE: u32 = 22_050;
 const SAMPLE_SIZE_BITS: u32 = 32;
-const CHANNELS: u32 = 2;
 
 const AUDIO_WORKLET_QUANTUM_FRAMES: u32 = 128;
-const AUDIO_WORKLET_QUANTUM_SECONDS: f64 = AUDIO_WORKLET_QUANTUM_FRAMES as f64 / SAMPLE_RATE as f64;
+const BYTES_PER_SAMPLE: usize = std::mem::size_of::<f32>();
 
-const BYTES_PER_SAMPLE: usize = (SAMPLE_SIZE_BITS / 8) as usize;
-const BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * CHANNELS as usize * BYTES_PER_SAMPLE;
+pub struct JsAudioProvider {
+    stream_opened: bool,
+}
 
-// Mirror the blocking behavior of ChannelAudioSink which has a bounded channel
-const MAX_JS_BUFFER_BYTES: usize = AUDIO_BUFFER_SIZE * BYTES_PER_SAMPLE * AUDIO_QUEUE_LEN;
+impl JsAudioProvider {
+    pub fn new() -> Self {
+        Self {
+            stream_opened: false,
+        }
+    }
+}
 
-pub struct JsAudioSink;
+impl AudioProvider for JsAudioProvider {
+    fn create_stream(
+        &mut self,
+        freq: i32,
+        channels: u8,
+        samples: u16,
+    ) -> Result<Box<dyn AudioSink>> {
+        if self.stream_opened {
+            log::info!(
+                "Ignoring additional JS audio stream: sample_rate={} channels={} samples={}",
+                freq,
+                channels,
+                samples
+            );
+            return Ok(null_audio_sink());
+        }
+        self.stream_opened = true;
+        Ok(Box::new(JsAudioSink::new(freq, channels, samples)))
+    }
+}
+
+struct JsAudioSink {
+    bytes_per_second: usize,
+    max_js_buffer_bytes: usize,
+    audio_worklet_quantum_seconds: f64,
+}
 
 impl JsAudioSink {
-    pub fn new() -> Self {
-        js_api::audio::did_open(SAMPLE_RATE, SAMPLE_SIZE_BITS, CHANNELS);
-        Self
+    fn new(freq: i32, channels: u8, samples: u16) -> Self {
+        let sample_rate = u32::try_from(freq).unwrap();
+        let channels_usize = usize::from(channels);
+        let bytes_per_second = sample_rate as usize * channels_usize * BYTES_PER_SAMPLE;
+        let max_js_buffer_bytes =
+            usize::from(samples) * channels_usize * BYTES_PER_SAMPLE * AUDIO_QUEUE_LEN;
+        let audio_worklet_quantum_seconds =
+            AUDIO_WORKLET_QUANTUM_FRAMES as f64 / f64::from(sample_rate);
+
+        js_api::audio::did_open(sample_rate, SAMPLE_SIZE_BITS, u32::from(channels));
+        Self {
+            bytes_per_second,
+            max_js_buffer_bytes,
+            audio_worklet_quantum_seconds,
+        }
     }
 }
 
 impl AudioSink for JsAudioSink {
-    fn send(&mut self, buffer: AudioBuffer) -> Result<()> {
+    fn send(&self, buffer: AudioBuffer) -> Result<()> {
         let expected_len = buffer.len() * BYTES_PER_SAMPLE;
-        let max_fill = MAX_JS_BUFFER_BYTES.saturating_sub(expected_len);
+        let max_fill = self.max_js_buffer_bytes.saturating_sub(expected_len);
         loop {
             let js_buffer_size = js_api::audio::buffer_size();
             if js_buffer_size < 0 || js_buffer_size as usize <= max_fill {
@@ -40,8 +81,8 @@ impl AudioSink for JsAudioSink {
             // can sleep instead of spinning. Leave some headroom for jitter,
             // and wait at most one audio worklet quantum.
             let wait_bytes = js_buffer_size as usize - max_fill;
-            let wait_seconds = ((wait_bytes as f64 / BYTES_PER_SECOND as f64) * 0.75)
-                .clamp(0.0, AUDIO_WORKLET_QUANTUM_SECONDS);
+            let wait_seconds = ((wait_bytes as f64 / self.bytes_per_second as f64) * 0.75)
+                .clamp(0.0, self.audio_worklet_quantum_seconds);
             js_api::runtime::sleep_seconds(wait_seconds);
         }
 
@@ -49,5 +90,14 @@ impl AudioSink for JsAudioSink {
             unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, expected_len) };
         js_api::audio::enqueue(bytes);
         Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        js_api::audio::buffer_size() <= 0
+    }
+
+    fn is_full(&self) -> bool {
+        let js_buffer_size = js_api::audio::buffer_size();
+        js_buffer_size >= 0 && (js_buffer_size as usize) >= self.max_js_buffer_bytes
     }
 }
