@@ -18,6 +18,9 @@ mergeInto(LibraryManager.library, {
             console.warn("Could not parse emulator stats", statsJson, error);
         }
     },
+    js_set_clipboard_text(textPtr) {
+        workerApi.setClipboardText(UTF8ToString(textPtr));
+    },
 
     // Video
     js_did_open_video(width, height) {
