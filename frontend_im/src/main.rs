@@ -28,6 +28,8 @@ fn main() {
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
     let floppy_names: Vec<String> = args.values_from_str("--floppy").unwrap_or_default();
     let cdrom_names: Vec<String> = args.values_from_str("--cdrom").unwrap_or_default();
+    let bluescsi_dir: Option<String> = args.opt_value_from_str("--bluescsi-dir").unwrap();
+    let bluescsi_send_dir: Option<String> = args.opt_value_from_str("--bluescsi-send-dir").unwrap();
     let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
@@ -87,6 +89,10 @@ fn main() {
         None,
     )
     .expect("Failed to create emulator");
+    emulator.set_shared_dirs(
+        bluescsi_dir.map(std::path::PathBuf::from),
+        bluescsi_send_dir.map(std::path::PathBuf::from),
+    );
 
     let mut next_scsi_id = 0;
     for disk_name in disk_names {
