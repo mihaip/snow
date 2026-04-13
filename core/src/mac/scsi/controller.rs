@@ -275,8 +275,12 @@ impl ScsiController {
         self.targets[id].as_ref().map(|t| t.target_type())
     }
 
+    pub fn set_shared_dirs(&mut self, shared_dir: Option<PathBuf>, send_dir: Option<PathBuf>) {
+        self.toolbox = BlueSCSI::new(shared_dir, send_dir);
+    }
+
     pub fn set_shared_dir(&mut self, path: Option<PathBuf>) {
-        self.toolbox = BlueSCSI::new(path);
+        self.set_shared_dirs(path, None);
     }
 
     pub fn new() -> Self {
