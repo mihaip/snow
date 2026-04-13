@@ -32,13 +32,16 @@ const TOOLBOX_API_VERSION: u8 = 0;
 #[derive(Default)]
 pub struct BlueSCSI {
     shared_dir: Option<PathBuf>,
+    send_dir: Option<PathBuf>,
     file: Option<File>,
 }
 
 impl BlueSCSI {
-    pub fn new(shared_dir: Option<PathBuf>) -> Self {
+    pub fn new(shared_dir: Option<PathBuf>, send_dir: Option<PathBuf>) -> Self {
+        let send_dir = send_dir.or_else(|| shared_dir.clone());
         Self {
             shared_dir,
+            send_dir,
             file: None,
         }
     }
@@ -182,13 +185,13 @@ impl BlueSCSI {
     }
 
     fn send_file_prep(&mut self, outdata: Option<&[u8]>) -> ScsiCmdResult {
-        let Some(shared_dir) = &self.shared_dir else {
+        let Some(send_dir) = &self.send_dir else {
             return ScsiCmdResult::Status(STATUS_CHECK_CONDITION);
         };
         if let Some(data) = outdata {
             if let Some(pos) = data.iter().position(|&b| b == 0) {
                 let name = macroman_to_utf8(&data[..pos]);
-                let path = shared_dir.join(name);
+                let path = send_dir.join(name);
                 match File::create(path) {
                     Ok(f) => {
                         self.file = Some(f);
