@@ -464,6 +464,10 @@ impl Emulator {
         Ok((emu, frame_recv))
     }
 
+    pub fn set_shared_dirs(&mut self, shared_dir: Option<PathBuf>, send_dir: Option<PathBuf>) {
+        self.config.scsi_mut().set_shared_dirs(shared_dir, send_dir);
+    }
+
     /// Restores a saved emulator state into a new Emulator instance
     #[cfg(feature = "savestates")]
     pub fn load_state<P: AsRef<Path>, PT: AsRef<Path>>(
