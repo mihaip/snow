@@ -4,6 +4,7 @@ use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus};
 use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
+use std::sync::{Arc, Mutex};
 
 use crate::cdrom::CdromManager;
 
@@ -115,9 +116,9 @@ fn main() {
     if cdrom_manager.is_some() {
         next_scsi_id += 1;
     }
-    let mut audio_provider = audio::JsAudioProvider::new();
+    let audio_provider = Arc::new(Mutex::new(audio::JsAudioProvider::new()));
     emulator
-        .set_audio_provider(&mut audio_provider)
+        .set_audio_provider(audio_provider)
         .expect("Failed to initialize audio");
     log::info!("Initialized {} SCSI devices", next_scsi_id);
 
