@@ -1,16 +1,17 @@
-use crossbeam_channel::Receiver;
+use std::sync::{Arc, Mutex};
+
 use snow_core::renderer::DisplayBuffer;
 
 use crate::js_api;
 
 pub struct Sender {
-    receiver: Receiver<DisplayBuffer>,
+    receiver: Arc<Mutex<Option<DisplayBuffer>>>,
     current_width: u16,
     current_height: u16,
 }
 
 impl Sender {
-    pub fn new(receiver: Receiver<DisplayBuffer>) -> Self {
+    pub fn new(receiver: Arc<Mutex<Option<DisplayBuffer>>>) -> Self {
         Self {
             receiver,
             current_width: 0,
@@ -19,7 +20,10 @@ impl Sender {
     }
 
     pub fn tick(&mut self) {
-        while let Ok(frame) = self.receiver.try_recv() {
+        while let Some(frame) = {
+            let mut lock = self.receiver.lock().unwrap();
+            lock.take()
+        } {
             self.send_frame(frame);
         }
     }
