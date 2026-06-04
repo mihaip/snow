@@ -31,6 +31,8 @@ fn main() {
     let cdrom_names: Vec<String> = args.values_from_str("--cdrom").unwrap_or_default();
     let bluescsi_dir: Option<String> = args.opt_value_from_str("--bluescsi-dir").unwrap();
     let bluescsi_send_dir: Option<String> = args.opt_value_from_str("--bluescsi-send-dir").unwrap();
+    let printer_output_dir: Option<String> =
+        args.opt_value_from_str("--printer-output-dir").unwrap();
     let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
@@ -95,12 +97,14 @@ fn main() {
         bluescsi_send_dir.map(std::path::PathBuf::from),
     );
 
-    let mut next_scsi_id = 0;
+    let mut next_disk_scsi_id = 0;
+    let mut occupied_scsi_ids = [false; 7];
     for disk_name in disk_names {
         match JsDiskImage::open(&disk_name) {
-            Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), next_scsi_id) {
+            Ok(disk) => match emulator.attach_disk_image_at(Box::new(disk), next_disk_scsi_id) {
                 Ok(_) => {
-                    next_scsi_id += 1;
+                    occupied_scsi_ids[next_disk_scsi_id] = true;
+                    next_disk_scsi_id += 1;
                 }
                 Err(err) => {
                     log::error!("Failed to attach SCSI disk '{}': {}", disk_name, err);
@@ -112,15 +116,42 @@ fn main() {
         }
     }
 
-    let mut cdrom_manager = CdromManager::new(&mut emulator, next_scsi_id, cdrom_names);
+    let mut cdrom_manager = CdromManager::new(&mut emulator, next_disk_scsi_id, cdrom_names);
     if cdrom_manager.is_some() {
-        next_scsi_id += 1;
+        occupied_scsi_ids[next_disk_scsi_id] = true;
+    }
+    if let Some(printer_output_dir) = printer_output_dir.filter(|dir| !dir.is_empty()) {
+        if !model.has_scsi() {
+            log::warn!(
+                "Skipping LaserWriter IISC printer: {} does not have SCSI",
+                model
+            );
+        } else if let Some(printer_scsi_id) = PRINTER_SCSI_SCAN_ORDER
+            .iter()
+            .copied()
+            .find(|id| !occupied_scsi_ids[*id])
+        {
+            emulator.attach_printer(printer_scsi_id, printer_output_dir.into());
+            occupied_scsi_ids[printer_scsi_id] = true;
+            log::info!(
+                "Attached LaserWriter IISC printer at SCSI ID #{}",
+                printer_scsi_id
+            );
+        } else {
+            log::warn!("Skipping LaserWriter IISC printer: no free SCSI ID");
+        }
     }
     let audio_provider = Arc::new(Mutex::new(audio::JsAudioProvider::new()));
     emulator
         .set_audio_provider(audio_provider)
         .expect("Failed to initialize audio");
-    log::info!("Initialized {} SCSI devices", next_scsi_id);
+    log::info!(
+        "Initialized {} SCSI devices",
+        occupied_scsi_ids
+            .iter()
+            .filter(|occupied| **occupied)
+            .count()
+    );
 
     let cmd_sender = emulator.create_cmd_sender();
     let event_recv = emulator.create_event_recv();
@@ -203,6 +234,8 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
     (9, MacModel::SE30),
     (17, MacModel::Classic),
 ];
+
+const PRINTER_SCSI_SCAN_ORDER: [usize; 7] = [4, 3, 2, 1, 0, 6, 5];
 
 fn model_from_gestalt(gestalt_id: u32) -> Option<MacModel> {
     GESTALT_MODEL_MAP
