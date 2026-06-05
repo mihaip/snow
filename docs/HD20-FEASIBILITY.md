@@ -232,14 +232,17 @@ The net engineering cost of the 512K path over the 512Ke/Plus path is therefore
 small: a capability-flag entry plus documentation/packaging of the startup
 floppy. The hard part (the DCD device) is shared.
 
-**Capacity note for the Infinite Mac collection.** The DCD command set
+**Capacity note for the Infinite Mac collection.** Capacity is dynamic (derived
+from the image file — see Phase 0), not fixed at 20 MB. The DCD command set
 addresses sectors with a 3-byte (big-endian) sector number, so the protocol
 ceiling is ~2^24 × 512 B ≈ 8 GB; the real HD20 is 20 MB and period software
-expects something in that range. Snow can advertise a larger geometry via the
-identify/status responses, but how much an era-appropriate HFS + the
-RAM-resident driver will tolerate is a separate question to validate — a single
-DCD volume is unlikely to hold the *entire* collection, so think of it as a
-generously sized working disk rather than a mount of the whole library.
+expects something in that range. The device advertises whatever capacity the
+image implies via its identify/status response, and ROM-based drivers honor it
+(BMOW's Floppy Emu already serves HD20 volumes larger than 20 MB), but two
+things bound the useful size and are worth validating: the era's HFS limits, and
+the 64K-ROM floppy-loaded "Hard Disk 20" driver, which was written for the 20 MB
+unit and may be less flexible than the ROM drivers. Treat a DCD volume as a
+generously sized working disk rather than a mount of the *entire* library.
 
 ## How Snow models the relevant hardware today
 
@@ -342,15 +345,26 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
 
 ### Phase 0 — Backing store
 
-* Define the on-disk image: a flat **512-bytes-per-block** file (same shape as
-  the existing SCSI HDD images), sized to the era-appropriate **20 MB**
-  (≈ 39,040 blocks). The 20 tag bytes per block are synthesized as zeros on
-  read and discarded on write — the OS ignores them — so they need not be
-  stored. (Keep a tag-storing variant in mind only if some tool turns out to
-  depend on tags; nothing in normal use does.)
-* Reuse Snow's existing "create disk image" workflow and writeback plumbing so
-  HD20 images are created, attached and persisted exactly like SCSI HDDs.
-* **Deliverable:** create/attach/persist a 20 MB HD20 image (no protocol yet).
+* The image is a flat **512-bytes-per-block** file and its capacity is
+  **derived from the file size, not hard-coded** — exactly like the SCSI HDDs,
+  where `ScsiDisk::blocks()` returns `backend().byte_len() / DISK_BLOCKSIZE`
+  (`core/src/mac/scsi/disk.rs`). Reuse the same `DiskImage` / `FileDiskImage`
+  backend so HD20 images get dynamic sizing, mmap and writeback for free.
+* Capacity is reported to the Mac through the DCD **Read ID / Controller
+  Status** response (block count + a synthesized cylinders/heads/sectors
+  geometry computed from `byte_len() / 512`). So the size lives in the image,
+  the same way it does for SCSI; nothing about the protocol fixes it at 20 MB.
+* Bounds and defaults: the DCD 3-byte sector address caps the protocol at
+  ~2^24 × 512 B ≈ 8 GB, and period HFS/driver limits are well below that. The
+  **default/recommended** image is the era-appropriate **20 MB** (≈ 39,040
+  blocks), but any whole-block size up to those limits is allowed — the create
+  dialog can offer 20 MB as the default while permitting other sizes, just like
+  the SCSI flow.
+* The 20 tag bytes per block are synthesized as zeros on read and discarded on
+  write — the OS ignores them — so they are not stored; the on-disk layout is a
+  plain 512-byte-per-block image, byte-compatible with a SCSI/HFS image.
+* **Deliverable:** create/attach/persist a dynamically sized HD20 image (no
+  protocol yet).
 
 ### Phase 1 — DCD protocol core (`core/src/mac/swim/dcd.rs`)
 
