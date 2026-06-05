@@ -989,6 +989,19 @@ impl Tickable for Emulator {
                         };
                         self.status_update()?;
                     }
+                    EmulatorCommand::AttachHd20(filename) => {
+                        use crate::mac::scsi::disk_image::FileDiskImage;
+                        match FileDiskImage::open_block_sized(&filename, true, 512) {
+                            Ok(img) => {
+                                self.config.swim_mut().attach_dcd(Box::new(img));
+                                info!("HD20 attached, image '{}' loaded", filename.display());
+                            }
+                            Err(e) => {
+                                self.user_error(&format!("Cannot attach HD20: {:#}", e));
+                            }
+                        }
+                        self.status_update()?;
+                    }
                     EmulatorCommand::ScsiBranchHdd(id, filename) => {
                         match self.config.scsi_mut().targets[id]
                             .as_mut()

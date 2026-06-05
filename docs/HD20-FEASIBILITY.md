@@ -2,11 +2,46 @@
 
 Status: investigation / design note. Phase 0 (backing-store abstraction),
 Phase 1 (protocol core) and Phase 2 (SWIM handshake state machine + IWM wiring)
-are implemented and unit-tested in `core/src/mac/swim/`. The Phase 2 handshake
-is verified for self-consistency by unit tests but has **not** yet been
-validated against a real DCD-aware ROM driver (no such ROM is available in the
-build environment). The remaining phases (config/UI, broader machine coverage,
-daisy-chaining, persistence) are not yet started.
+are implemented and unit-tested in `core/src/mac/swim/`. A minimal attach path
+(`EmulatorCommand::AttachHd20`) is also wired so the device can be driven by a
+booting ROM. The Phase 2 handshake has been **partially validated against the
+real Macintosh Plus ROM** (see "Hardware validation" below); the full boot
+sequence is not yet complete. The remaining phases (config/UI, broader machine
+coverage, daisy-chaining, persistence) are not yet started.
+
+## Hardware validation (Macintosh Plus ROM)
+
+The DCD path was exercised by booting the real 128K Mac Plus ROM with an HD20
+image attached (via a throwaway harness driving `snow_core`'s `Emulator`). The
+following is confirmed working end-to-end against the ROM's own DCD driver:
+
+* **Device detection** — the ROM's startup probe (phase states 5/6/7) reads the
+  device's RD-line pattern via the status SENSE bit and recognises the device.
+* **Command decode** — the ROM issues a Controller Status (`0x03`) command; the
+  device decodes it with a valid checksum (`03 00 00 00 00 00 FD`).
+* **Response delivery** — the device encodes the 343-byte status response and
+  the ROM reads it back and **accepts it**, continuing to a further command.
+
+Four real bugs were found and fixed through this validation (all grounded in
+observed ROM behaviour or the TashTwenty firmware):
+
+1. The Mac appends NRZI flush bytes after the final group — the device must
+   ignore bytes past the declared group count, not require an exact length.
+2. Response bytes must be **paced** into the data register at the IWM byte rate
+   (one byte per `DCD_TICKS_PER_BYTE` cycles) rather than one per register
+   access, or the ROM's timed read loop mis-frames.
+3. The Controller Status characteristics byte must be `0xF6` (mountable,
+   readable, writeable, ejectable, icon_included, disk_in_place) and the
+   manufacturer `0x0100`, per the TashTwenty firmware.
+4. (Investigated) The Mac dictates the response group count in the command
+   header; the device's response size must match the command it is answering.
+
+**Open issue blocking a full boot:** after the first status exchange the ROM
+issues a second `0x03` command with a non-standard 28-byte (4-group) payload and
+`resp_groups=1`, whose semantics are not yet understood (it is not the documented
+7-byte status request). Until that command is answered correctly the ROM does
+not progress to block reads. Resolving it likely needs the ROM's DCD driver
+disassembly or a fuller protocol reference than the public notes provide.
 
 ## Summary
 

@@ -29,11 +29,11 @@ pub(crate) struct FileDiskImage {
 }
 
 impl FileDiskImage {
-    pub(super) fn open(filename: &Path, writable: bool) -> Result<Self> {
+    pub(crate) fn open(filename: &Path, writable: bool) -> Result<Self> {
         Self::open_file(filename, writable)
     }
 
-    pub(super) fn open_block_sized(
+    pub(crate) fn open_block_sized(
         filename: &Path,
         writable: bool,
         block_size: usize,

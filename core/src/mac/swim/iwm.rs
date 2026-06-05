@@ -141,9 +141,7 @@ impl Swim {
         let val = match (self.q6, self.q7) {
             (false, false) => {
                 // Data register
-                if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
-                    self.dcd.as_mut().unwrap().read_data()
-                } else if !self.enable {
+                if !self.enable {
                     0xFF
                 } else {
                     std::mem::replace(&mut self.datareg, 0)

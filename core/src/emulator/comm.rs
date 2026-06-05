@@ -44,6 +44,8 @@ pub enum EmulatorCommand {
     /// Parameters: drive id, enabled
     SetFloppyWriteback(usize, bool),
     ScsiAttachHdd(usize, PathBuf),
+    /// Attaches a DCD (Hard Disk 20) device on the external floppy port.
+    AttachHd20(PathBuf),
     ScsiBranchHdd(usize, PathBuf),
     ScsiAttachCdrom(usize),
     ScsiLoadMedia(usize, PathBuf),

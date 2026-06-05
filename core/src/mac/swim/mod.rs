@@ -148,6 +148,9 @@ pub struct Swim {
     /// DCD (Hard Disk 20) device on the external floppy port, if attached
     #[serde(skip)]
     dcd: Option<DcdController>,
+    /// Cycle accumulator that paces DCD response bytes into the data register
+    #[serde(skip)]
+    dcd_byte_timer: Ticks,
 
     pub dbg_pc: u32,
     pub dbg_break: LatchingEvent,
@@ -208,6 +211,7 @@ impl Swim {
 
             enable: false,
             dcd: None,
+            dcd_byte_timer: 0,
             dbg_pc: 0,
             dbg_break: LatchingEvent::default(),
         }
@@ -239,8 +243,11 @@ impl Swim {
         self.write_buffer.is_some()
     }
 
+    /// Cycles between DCD response bytes presented in the data register,
+    /// approximating the ~490 kHz IWM byte rate at the 8 MHz base clock.
+    const DCD_TICKS_PER_BYTE: Ticks = 128;
+
     /// Attaches a DCD (Hard Disk 20) device on the external port.
-    #[allow(dead_code)] // Exposed to the frontend in a later phase.
     pub fn attach_dcd(&mut self, image: Box<dyn crate::mac::scsi::disk_image::DiskImage>) {
         self.dcd = Some(DcdController::new(dcd::DcdDevice::new(image)));
     }
@@ -349,6 +356,16 @@ impl Tickable for Swim {
             match self.mode {
                 SwimMode::Iwm => self.iwm_tick(ticks)?,
                 SwimMode::Ism => self.ism_tick(ticks)?,
+            }
+        } else if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
+            // Clock the next DCD response byte into the data register at the IWM
+            // byte rate so the Mac's timed read loop sees it paced correctly.
+            self.dcd_byte_timer += ticks;
+            while self.dcd_byte_timer >= Self::DCD_TICKS_PER_BYTE {
+                self.dcd_byte_timer -= Self::DCD_TICKS_PER_BYTE;
+                if let Some(b) = self.dcd.as_mut().unwrap().next_send_byte() {
+                    self.datareg = b;
+                }
             }
         }
 

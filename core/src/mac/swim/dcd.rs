@@ -5,6 +5,7 @@
 #![allow(dead_code)] // Not yet wired into the bus.
 
 use anyhow::{Result, bail};
+use log::*;
 
 use crate::mac::scsi::disk_image::DiskImage;
 
@@ -128,16 +129,20 @@ impl DcdDevice {
         if wire.first() != Some(&SYNC) {
             bail!("DCD request missing sync byte");
         }
-        let (Some(&len_byte), Some(&_resp_groups)) = (wire.get(1), wire.get(2)) else {
+        let (Some(&len_byte), Some(&_resp_byte)) = (wire.get(1), wire.get(2)) else {
             bail!("DCD request truncated header");
         };
         let group_count = len_byte.wrapping_sub(LEN_BIAS) as usize;
+        let needed = group_count * 8;
         let groups = &wire[3..];
-        if groups.len() != group_count * 8 {
+        // The Mac appends a couple of flush bytes after the final group to clock
+        // the last byte out of the IWM shift register; ignore anything past the
+        // declared group count.
+        if groups.len() < needed {
             bail!("DCD request length mismatch");
         }
 
-        let request = decode_payload(groups, Direction::MacToDevice);
+        let request = decode_payload(&groups[..needed], Direction::MacToDevice);
         if !verify_checksum(&request) {
             bail!("DCD request checksum mismatch");
         }
@@ -151,6 +156,7 @@ impl DcdDevice {
 
     fn handle(&mut self, req: &[u8]) -> Result<Vec<u8>> {
         let opcode = *req.first().unwrap_or(&0xFF);
+        debug!("DCD opcode {:#04x}", opcode);
         match opcode {
             0x00 => self.handle_read(req),
             0x01 | 0x41 | 0x02 | 0x42 => self.handle_write(req, opcode),
@@ -236,7 +242,8 @@ impl DcdDevice {
         p.extend_from_slice(&[0, 0, 0, 0]); // status
         p.extend_from_slice(&DEVICE_TYPE); // device type
         p.extend_from_slice(&MANUFACTURER); // manufacturer
-        p.push(0x00); // characteristics
+        // mountable, readable, writeable, ejectable, icon_included, disk_in_place
+        p.push(0xF6); // characteristics
         p.extend_from_slice(&u24_be(self.block_count() as u32)); // blocks
         p.extend_from_slice(&[0, 0]); // spare blocks
         p.extend_from_slice(&[0, 0]); // bad blocks
@@ -328,6 +335,7 @@ impl DcdController {
             return;
         }
         self.state = new;
+        trace!("DCD phase state {} (stage {:?})", new, self.stage);
 
         // RESET: power-on-equivalent reset.
         if new == 4 {
@@ -365,6 +373,11 @@ impl DcdController {
     fn process(&mut self) {
         if self.rx.first() == Some(&SYNC) && self.rx.len() >= 3 {
             self.tx = self.device.process_request(&self.rx).unwrap_or_default();
+            debug!(
+                "DCD command: {} command bytes -> {} response bytes",
+                self.rx.len(),
+                self.tx.len()
+            );
         } else {
             self.tx.clear();
         }
@@ -409,10 +422,11 @@ impl DcdController {
         self.rx.push(byte);
     }
 
-    /// Returns the next response byte for the Mac to read.
-    pub fn read_data(&mut self) -> u8 {
-        let b = self.tx.get(self.tx_pos).copied().unwrap_or(0);
-        if self.tx_pos < self.tx.len() {
+    /// Returns the next response byte to clock onto the read line, or `None`
+    /// once the queued response is exhausted.
+    pub fn next_send_byte(&mut self) -> Option<u8> {
+        let b = self.tx.get(self.tx_pos).copied();
+        if b.is_some() {
             self.tx_pos += 1;
         }
         b
@@ -444,7 +458,7 @@ const DEVICE_NAME: &[u8; 13] = b"Snow HD20    ";
 const DEVICE_TYPE_ID: [u8; 3] = [0x00, 0x00, 0x01];
 const FIRMWARE_REV: [u8; 2] = [0x00, 0x01];
 const DEVICE_TYPE: [u8; 2] = [0x00, 0x01];
-const MANUFACTURER: [u8; 2] = [0x00, 0x01];
+const MANUFACTURER: [u8; 2] = [0x01, 0x00];
 
 #[cfg(test)]
 mod tests {
@@ -517,13 +531,7 @@ mod tests {
         let mut out = Vec::new();
         if has_response {
             assert!(c.is_sending());
-            // Response wire bytes always have their MSb set, so a zero marks the
-            // end of the queued response.
-            loop {
-                let b = c.read_data();
-                if b == 0 {
-                    break;
-                }
+            while let Some(b) = c.next_send_byte() {
                 out.push(b);
             }
         }
@@ -711,6 +719,17 @@ mod tests {
         assert_eq!(cap, dev.block_count());
         assert_eq!(cap, 40960);
         assert_eq!(u16::from_be_bytes([resp[27], resp[28]]) as usize, DCD_DATA_SIZE);
+    }
+
+    #[test]
+    fn trailing_flush_bytes_ignored() {
+        // The Mac clocks a couple of extra bytes out of the IWM shift register
+        // after the final group; the device must ignore them.
+        let mut dev = device_with_blocks(4);
+        let mut req = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
+        req.extend_from_slice(&[0x00, 0x00]);
+        let resp = unframe_response(&dev.process_request(&req).unwrap());
+        assert_eq!(resp[0], 0x84);
     }
 
     #[test]
