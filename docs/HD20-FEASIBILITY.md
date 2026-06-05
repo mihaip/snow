@@ -98,6 +98,35 @@ limited to floppies. The HD20 is the *only* period-correct way to do this on
 those machines — but the ROM/filesystem history imposes hard constraints, and
 they land differently per model.
 
+### The value window: machines without SCSI
+
+SCSI arrived with the **Macintosh Plus (January 1986)** and is present on
+**every Mac from the Plus onward**. The only Macs that never had SCSI are the
+three pre-Plus machines: the **128K, 512K, and 512Ke**. Snow already encodes
+this exactly — `MacModel::has_scsi()` (`core/src/mac/mod.rs:181`) returns
+`false` for precisely `Early128K | Early512K | Early512Ke` and `true` for
+everything else.
+
+DCD ROM support, by contrast, exists on the 512Ke/Plus and continued through
+the SE, Mac II family and SE/30 (System 6.0.8 / 7.1 still work; 7.5 dropped it).
+But on any machine that *has* SCSI, you would simply use SCSI — it is faster and
+needs no boot floppy. So although DCD is supported on many models, it is only
+*uniquely valuable* where there is no SCSI alternative:
+
+| Model | SCSI? | DCD/HD20 the only mass storage? |
+|---|---|---|
+| 128K | No | No — too little RAM for HFS (HD20 unusable) |
+| **512K** | No | **Yes** — sole hard-disk option (via boot floppy) |
+| **512Ke** | No | **Yes** — sole hard-disk option (native) |
+| Plus | Yes | No — has SCSI *and* DCD-in-ROM; use SCSI |
+| SE / II / SE-30 / … | Yes | No — DCD is legacy; use SCSI |
+
+So the window where HD20/DCD is *the* answer in Snow is just the **512K and
+512Ke** — precisely the two models that otherwise have no hard-disk option at
+all. The Plus is the easiest *bring-up* target (native DCD ROM, no boot floppy),
+and broader-model support is worthwhile for completeness, but the 512K/512Ke are
+the actual value proposition.
+
 **The HD20 is inherently an HFS device.** HFS was created *for* the HD20 — MFS
 (the flat filesystem in System 1.0–2.0) cannot practically address a 20 MB
 volume. Apple shipped HFS *with* the HD20 as **System 2.1 / Finder 5.0**
@@ -303,6 +332,133 @@ byte group is explicitly handshaked (`HOST` ↔ `!HSHK`), so the emulator can be
 part of low-level disk emulation and makes a correct implementation much more
 tractable — closer in spirit to the existing SCSI controller state machine than
 to the flux engine.
+
+## Implementation plan
+
+This plan delivers the DCD device once and then widens machine and OS-version
+coverage in layers. The device logic is identical across every supported
+machine; what changes per model is only *how the driver reaches it* (ROM vs.
+boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
+
+### Phase 0 — Backing store
+
+* Define the on-disk image: a flat **512-bytes-per-block** file (same shape as
+  the existing SCSI HDD images), sized to the era-appropriate **20 MB**
+  (≈ 39,040 blocks). The 20 tag bytes per block are synthesized as zeros on
+  read and discarded on write — the OS ignores them — so they need not be
+  stored. (Keep a tag-storing variant in mind only if some tool turns out to
+  depend on tags; nothing in normal use does.)
+* Reuse Snow's existing "create disk image" workflow and writeback plumbing so
+  HD20 images are created, attached and persisted exactly like SCSI HDDs.
+* **Deliverable:** create/attach/persist a 20 MB HD20 image (no protocol yet).
+
+### Phase 1 — DCD protocol core (`core/src/mac/swim/dcd.rs`)
+
+* `DcdDevice` owning the backing store, identify/status metadata (name, type,
+  firmware rev, 20 MB capacity/geometry), and the transfer state machine.
+* 7-to-8 encode/decode, `0xAA` sync + length framing, and checksum helpers, as
+  pure functions with unit tests (the spec is precise here, so these are
+  testable in isolation before any bus wiring).
+* Command handlers: **read (`0x00`)**, **write (`0x01`)**, **device-identify
+  (`0x04`)**; canned-success stubs for **controller status (`0x03`)**,
+  **format (`0x19`)** and **verify (`0x1A`)**, following TashTwenty (which ships
+  only read/write/identify and fakes the rest, and that suffices for disk init).
+* **Deliverable:** a unit-tested protocol engine driven by fed byte streams,
+  with no SWIM integration yet.
+
+### Phase 2 — SWIM integration (the handshake)
+
+* Add an `Option<DcdDevice>` (later a small array — see Phase 6) to `Swim` for
+  the external port.
+* On phase-line changes in `iwm_access()`, when the external port is enabled
+  (`extdrive && enable`) and the lines enter DCD states, drive the DCD state
+  machine (HOST/HOFF/RESET) instead of the floppy register logic.
+* In the status-register read path (`iwm_read`), return the device's `!HSHK` on
+  `SENSE` when a DCD device is selected and in a handshake-sensing state.
+* Feed response bytes into `datareg` and consume command bytes from
+  `write_buffer` while a transfer is active, bypassing the `iwm_tick` flux path.
+* **Deliverable:** a real DCD-aware ROM (512Ke or Plus) probes, identifies,
+  reads and writes the device. This is the hard, debugging-heavy milestone;
+  everything after is breadth.
+
+### Phase 3 — Configuration & UI
+
+* Add a per-model capability: `fn dcd_max_devices(self) -> usize` (0 = no DCD).
+  Start with 512Ke/Plus non-zero; fill in the rest in later phases.
+* Attach point on `Mac`/the bus mirroring `scsi_attach_hdd`.
+* "Attach HD20…" action in the egui and TUI media menus, parallel to the SCSI
+  HDD attach UI in `frontend_egui/src/app.rs`.
+* **Deliverable:** attach/detach an HD20 from the UI on a 128K-ROM machine and
+  boot from it.
+
+### Phase 4 — 64K-ROM boot-floppy path (Macintosh 512K)
+
+* Set `dcd_max_devices` for `Early512K` (keep `Early128K` at 0 — no RAM for HFS).
+* No new device code — the floppy-loaded "Hard Disk 20" driver drives the same
+  state machine. Verify the existing internal-drive 400K MFS boot and the
+  automatic post-load eject behave correctly with an HD20 present.
+* Documentation/packaging: link to (or optionally bundle) an **HD20 Startup
+  floppy** image (System 2.1+ with the "Hard Disk 20" file); document that it
+  must be inserted at every cold boot and self-ejects.
+* **Deliverable:** a stock 512K boots the HD20 Startup floppy and mounts the
+  HD20.
+
+### Phase 5 — SWIM-based machines (SE FDHD, Mac II, IIx, IIcx, SE/30)
+
+* DCD is an **IWM-level** protocol; on SWIM machines the driver uses the SWIM's
+  IWM-compatible mode (Snow's SWIM already boots in IWM mode). The DCD hooks
+  added in Phase 2 live in that IWM path, so these machines should work with
+  only a `dcd_max_devices` entry (typically **2** here) — *verify* that the
+  driver never needs DCD via ISM mode (it should not).
+* The plain **SE** (non-FDHD) uses the IWM directly and is covered by Phase 2
+  as-is. These machines all have SCSI, so this phase is about completeness, not
+  primary value.
+* **Deliverable:** HD20 works (or is explicitly confirmed N/A) on each
+  SCSI-equipped, DCD-capable model.
+
+### Phase 6 — Daisy-chaining
+
+* Generalize the single device to an ordered chain addressed by the device ID in
+  the command header: up to **4** on 512Ke/Plus (and 512K via the INIT), up to
+  **2** on the SWIM-era machines, honoring `dcd_max_devices`.
+* A device that exceeds the ROM's supported count is simply not enumerated
+  (matches real behavior).
+* **Deliverable:** multiple HD20 volumes on one machine.
+
+### Phase 7 — Persistence, polish, regression tests
+
+* Writeback to the host image on flush/eject/quit via the existing mechanism.
+* Save-state (serde) support for the device, consistent with the rest of `Swim`.
+* Protocol unit tests (Phase 1) plus an integration smoke test that boots a ROM
+  and round-trips a block.
+
+### Machine × OS compatibility matrix (validation targets)
+
+DCD is usable from **System 2.1 / Finder 5.0 (Sept 1985) through System 7.1**;
+**System 7.5 dropped DCD support**, so do not expect it there. Per-machine the
+OS ceiling also limits the testable range:
+
+| Model | DCD reaches device via | Usable System range to test | Max DCD devices |
+|---|---|---|---|
+| 128K | — | n/a (HD20 unusable) | 0 |
+| 512K | Boot floppy ("Hard Disk 20" file, IWM) | 2.1 – ~3.2 | up to 4 (via INIT) |
+| 512Ke | ROM (IWM) | 2.1 – 4.1 | up to 4 |
+| Plus | ROM (IWM) | 2.1 – 7.1 (7.5 drops DCD) | up to 4 |
+| SE | ROM (IWM) | 3.x – 7.1 | up to 2 |
+| SE FDHD | ROM (SWIM in IWM mode) | 6.0.x – 7.1 | up to 2 |
+| Mac II / IIx / IIcx / SE-30 | ROM (SWIM in IWM mode) | 6.0.x – 7.1 | up to 2 |
+
+Priorities given the value window: **Plus** (easiest bring-up) → **512Ke**
+(primary value, native) → **512K** (primary value, boot floppy) → SWIM machines
+and daisy-chaining (completeness).
+
+### Testing prerequisites
+
+* DCD-aware ROM images for each target model (all listed models have DCD ROM
+  support except the 128K).
+* An **HD20 Startup floppy** image for the 512K path (freely available).
+* A spread of System versions (2.1, 3.x, 6.0.8, 7.1) to exercise the OS window,
+  plus a 7.5 negative test to confirm graceful non-detection.
 
 ## Reference implementations to port from
 
