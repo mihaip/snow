@@ -25,6 +25,12 @@ Recommended scope for a first cut: target the **Macintosh Plus / 512Ke**
 relies on (read, write, device-identify), and back the device with a flat
 HFS disk image.
 
+One important caveat for the small-RAM compact Macs (see "Target machines"
+below): the HD20 is inseparable from **HFS** and requires **System 2.1 /
+Finder 5.0 or later**. The 64K-ROM machines (128K, 512K) have no DCD or HFS
+support in ROM, so the HD20 cannot be used to run the earliest, pre-HFS
+systems (System 1.0–2.0) — that combination never existed on real hardware.
+
 ## What the HD20 / DCD is
 
 * The HD20 (1985) was Apple's external 20 MB hard disk for pre-SCSI Macs. It
@@ -83,6 +89,59 @@ TashTwenty's experience is informative: it implements only **read, write, and
 device identification** and "fakes" responses to everything else (including
 format), and that is sufficient for the OS — including disk initialization — to
 work. That sets a realistic minimum bar for a first Snow implementation.
+
+## Target machines and the Infinite Mac use case
+
+A motivating goal is giving the **compact, pre-SCSI Macs** (128K/512K-class) a
+hard disk so a large software collection can be mounted, instead of being
+limited to floppies. The HD20 is the *only* period-correct way to do this on
+those machines — but the ROM/filesystem history imposes hard constraints, and
+they land differently per model.
+
+**The HD20 is inherently an HFS device.** HFS was created *for* the HD20 — MFS
+(the flat filesystem in System 1.0–2.0) cannot practically address a 20 MB
+volume. Apple shipped HFS *with* the HD20 as **System 2.1 / Finder 5.0**
+(Sept 1985). So:
+
+* There is no such thing as a "pre-HFS" HD20 — every HD20 volume is HFS.
+* The minimum system that can use an HD20 is the 2.1 / Finder 5.0 era.
+* **System 1.0–2.0 are incompatible with the HD20**, full stop.
+
+**The 64K ROM (128K, 512K) has no DCD or HFS support.** Apple's workaround was
+the **HD20 INIT / "Hard Disk 20 Startup" floppy**: the machine boots from a
+floppy whose System Folder patches DCD + HFS (+ 800K) support into RAM, after
+which the HD20 mounts. Consequences:
+
+* These machines **cannot boot directly from the HD20** — they always boot the
+  startup floppy first. So emulating the HD20 device alone is *not sufficient*
+  for them; the user must also supply and boot the HD20 Startup floppy.
+* The **128K cannot use the HD20 at all** — it lacks the RAM to load HFS, and
+  Apple never supported the combination.
+
+**The 128K ROM (512Ke, Plus) has DCD + HFS + 800K built in.** These boot
+directly from the HD20 with no startup floppy and need *only* the DCD device
+emulation.
+
+| Snow model | ROM | HD20 viable? | Requirements |
+|---|---|---|---|
+| Early128K | 64K | No | Insufficient RAM for HFS |
+| Early512K | 64K | Awkward | DCD emulation **plus** an HD20 Startup floppy (System 2.1/Finder 5.0); HFS only; not bootable from HD20 |
+| **Early512Ke** | 128K | Yes (clean) | DCD emulation only; boots directly from HD20 |
+| **Plus** | 128K | Yes (clean) | DCD emulation only (also has SCSI as an alternative) |
+
+Snow already encodes the relevant split: `fdd_drives()` gives the 64K-ROM
+machines (`Early128K`/`Early512K`) 400K drives, while `Early512Ke`/`Plus` get
+800K drives and the 128K ROM. That means the 512Ke/Plus path is purely a
+matter of the DCD device, whereas the 512K path additionally depends on
+user-supplied boot media.
+
+**Implication for prioritization:** the **512Ke is the sweet spot** for the
+Infinite Mac use case — effectively a 512K with the better ROM, native
+HD20/HFS support, and direct boot — and should be the first target. The 512K
+(64K ROM) is a possible follow-up but requires shipping/booting the HD20
+Startup software and confines the user to System 2.1+/HFS. The 128K and the
+System 1.0–2.0 / MFS world are out of scope by hardware design, not by any
+emulation limitation.
 
 ## How Snow models the relevant hardware today
 
@@ -212,10 +271,15 @@ to the flux engine.
   with a single device on Plus/512Ke and expand.
 * Need a DCD-aware ROM image to test against (the targeted models have it).
 
-**Recommendation:** Proceed, scoped to a **single HD20 on the Macintosh Plus**
-first, implementing read/write/identify with stubbed status/format and a flat
-HFS backing image. This is enough to boot and use an HD20 volume and validates
-all the integration hook points; daisy-chaining and additional models can
-follow. The clean IWM/SWIM abstraction already present in Snow makes this an
-additive change confined to `core/src/mac/swim/` plus a small amount of config
-and UI glue.
+**Recommendation:** Proceed, scoped to a **single HD20 on the 512Ke / Plus**
+(128K-ROM machines) first, implementing read/write/identify with stubbed
+status/format and a flat HFS backing image. These boot directly from the HD20
+with no extra software, so this validates all the integration hook points with
+the least moving parts; daisy-chaining and the 512K (64K-ROM, HD20-Startup-floppy)
+path can follow. For the Infinite Mac goal of attaching a large software
+collection to a compact Mac, the **512Ke is the recommended host** — it pairs
+native HD20/HFS support with the small-machine experience. Note this inherently
+means HFS and System 2.1+; the 128K and pre-HFS System 1.0–2.0 are out of scope
+by hardware/OS design. The clean IWM/SWIM abstraction already present in Snow
+makes this an additive change confined to `core/src/mac/swim/` plus a small
+amount of config and UI glue.
