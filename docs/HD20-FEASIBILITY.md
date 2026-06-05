@@ -30,25 +30,44 @@ observed ROM behaviour or the TashTwenty firmware):
 2. Response bytes must be **paced** into the data register at the IWM byte rate
    (one byte per `DCD_TICKS_PER_BYTE` cycles) rather than one per register
    access, or the ROM's timed read loop mis-frames.
-3. The Controller Status characteristics byte must be `0xF6` (mountable,
-   readable, writeable, ejectable, icon_included, disk_in_place) and the
-   manufacturer `0x0100`, per the TashTwenty firmware.
-4. The Mac dictates the response group count in the command header
-   (`resp_groups`); the device sends exactly that many groups (the TashTwenty
-   firmware copies `RC_RSPG` into its group count). The device now resizes its
-   response to that length and recomputes the trailing checksum so the shortened
-   payload stays valid.
+3. The Mac dictates the response group count in the command header
+   (`resp_groups`); the device sends exactly that many groups and recomputes the
+   trailing checksum (the TashTwenty firmware copies `RC_RSPG` likewise).
+4. Identity/status fields were aligned to a real HD20 / TashTwenty: device type
+   `0x000210`, Read-ID bytes-per-block `0x0214` (532 = tags + data), and the
+   status "number of blocks" field is the highest addressable block (count − 1,
+   per TashTwenty's own comment).
 
-**Open issue blocking a full boot:** after the first full status exchange the
-ROM issues a second `0x03` command with a non-standard 28-byte (4-group) payload
-and `resp_groups=1`. Even when answered with a correctly-sized, valid-checksum
-1-group response, the ROM still does not progress to block reads — so the
-blocker is the *content* of that response (or an earlier status field the ROM
-validates), not the framing. Pinning it down needs the ROM's DCD driver
-disassembly or the exact HD20 status/identify field values, which the public
-protocol notes do not fully provide. The handshake, codec, detection, command
-decode and paced response readback are all confirmed working against the real
-ROM; this last step is content/semantics, not mechanism.
+**Where it stops, and why the gap is *timing*, not content.** With the above, the
+ROM runs: detect → Controller Status (`resp_groups=49`, full 343-byte response) →
+a second Controller Status (`resp_groups=1`, 7-byte response) → then drops into
+its idle device-poll loop (phase states 6/7/2) and shows the "?" disk — it gives
+up *without ever issuing a block read*, whether the image is blank or a real
+bootable System volume.
+
+The decisive observation: **TashTwenty — real hardware that boots Macs — returns
+a response to that second status command byte-for-byte identical to ours**
+(`[0x83,0x00,0x00,0x00,0x00,0x00,checksum]`), and its full-status content differs
+from both ours and the HD20 spec (it uses characteristics `0xF6`, manufacturer
+`0x0100`) yet the Mac boots from it. So the blocker is **not** the response
+content; it is a low-level signalling/timing difference between our byte-paced
+data path and the bit-level behaviour TashTwenty drives on the real IWM lines.
+Leading suspects, not yet addressed:
+
+* **HOFF / hold-off (phase state 0)** is not implemented. The protocol lets the
+  Mac suspend a transfer (state 1 → 0) to service interrupts and resume it
+  (0 → 1) with a fresh `0xAA` sync + the next group. Long transfers (the 343-byte
+  status, and any block read) are prime candidates to be suspended; without
+  hold-off handling such a transfer desyncs.
+* The **byte-pacing rate** (`DCD_TICKS_PER_BYTE`, currently 128) and the exact
+  `!HSHK` assert/deassert timing are approximations that may not match the ROM's
+  read loop closely enough to progress past status.
+
+Closing this needs a bit-level reference: a logic-analyzer capture of a real
+HD20 / TashTwenty boot to diff against, or the Plus ROM's DCD driver
+disassembly. The authoritative write-ups (BMOW's reverse-engineering article and
+the bitsavers DCD spec PDFs) were unreachable from the build environment, whose
+network policy allowlists only GitHub.
 
 ## Summary
 

@@ -236,7 +236,7 @@ impl DcdDevice {
         p.extend_from_slice(&DEVICE_TYPE_ID); // device type
         p.extend_from_slice(&FIRMWARE_REV); // firmware revision
         p.extend_from_slice(&u24_be(blocks as u32)); // capacity (blocks)
-        p.extend_from_slice(&(DCD_DATA_SIZE as u16).to_be_bytes()); // bytes/block
+        p.extend_from_slice(&(DCD_BLOCK_SIZE as u16).to_be_bytes()); // bytes/block (532)
         p.extend_from_slice(&cyl.to_be_bytes()); // cylinders
         p.push(heads); // heads
         p.push(secs); // sectors
@@ -255,9 +255,11 @@ impl DcdDevice {
         p.extend_from_slice(&[0, 0, 0, 0]); // status
         p.extend_from_slice(&DEVICE_TYPE); // device type
         p.extend_from_slice(&MANUFACTURER); // manufacturer
-        // mountable, readable, writeable, ejectable, icon_included, disk_in_place
-        p.push(0xF6); // characteristics
-        p.extend_from_slice(&u24_be(self.block_count() as u32)); // blocks
+        // mountable, readable, writeable, icon_included, disk_in_place
+        // (deliberately not ejectable: that flags removable media)
+        p.push(0xE6); // characteristics
+        // This field is the highest addressable block, i.e. block count - 1.
+        p.extend_from_slice(&u24_be(self.block_count().saturating_sub(1) as u32));
         p.extend_from_slice(&[0, 0]); // spare blocks
         p.extend_from_slice(&[0, 0]); // bad blocks
         p.extend_from_slice(&[0u8; 52]); // manufacturer reserved
@@ -466,12 +468,12 @@ fn geometry(blocks: usize) -> (u16, u8, u8) {
     (cyl, HEADS as u8, SECTORS as u8)
 }
 
-// Identity values, to be confirmed against a real ROM driver.
+// Identity values modelled on a real HD20 (sample values from the DCD notes).
 const DEVICE_NAME: &[u8; 13] = b"Snow HD20    ";
-const DEVICE_TYPE_ID: [u8; 3] = [0x00, 0x00, 0x01];
-const FIRMWARE_REV: [u8; 2] = [0x00, 0x01];
+const DEVICE_TYPE_ID: [u8; 3] = [0x00, 0x02, 0x10];
+const FIRMWARE_REV: [u8; 2] = [0x33, 0x72];
 const DEVICE_TYPE: [u8; 2] = [0x00, 0x01];
-const MANUFACTURER: [u8; 2] = [0x01, 0x00];
+const MANUFACTURER: [u8; 2] = [0x00, 0x01];
 
 #[cfg(test)]
 mod tests {
@@ -731,7 +733,7 @@ mod tests {
         let cap = sector_addr(&resp[24..27]);
         assert_eq!(cap, dev.block_count());
         assert_eq!(cap, 40960);
-        assert_eq!(u16::from_be_bytes([resp[27], resp[28]]) as usize, DCD_DATA_SIZE);
+        assert_eq!(u16::from_be_bytes([resp[27], resp[28]]) as usize, DCD_BLOCK_SIZE);
     }
 
     #[test]
