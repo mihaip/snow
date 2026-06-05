@@ -129,9 +129,10 @@ impl DcdDevice {
         if wire.first() != Some(&SYNC) {
             bail!("DCD request missing sync byte");
         }
-        let (Some(&len_byte), Some(&_resp_byte)) = (wire.get(1), wire.get(2)) else {
+        let (Some(&len_byte), Some(&resp_byte)) = (wire.get(1), wire.get(2)) else {
             bail!("DCD request truncated header");
         };
+        let resp_groups = resp_byte.wrapping_sub(LEN_BIAS) as usize;
         let group_count = len_byte.wrapping_sub(LEN_BIAS) as usize;
         let needed = group_count * 8;
         let groups = &wire[3..];
@@ -147,7 +148,19 @@ impl DcdDevice {
             bail!("DCD request checksum mismatch");
         }
 
-        let response = self.handle(&request)?;
+        let mut response = self.handle(&request)?;
+        // The device sends exactly as many groups as the Mac asked for in the
+        // command header (the real firmware copies this from the request); if
+        // that differs from the natural response length, resize and recompute
+        // the trailing checksum so the shortened payload stays valid.
+        let target = resp_groups * 7;
+        if target != 0 && target != response.len() {
+            response.resize(target, 0);
+            let last = target - 1;
+            response[last] = 0;
+            response[last] = checksum_for(&response);
+        }
+
         let mut out = Vec::with_capacity(1 + response.len() / 7 * 8);
         out.push(SYNC);
         out.extend(encode_payload(&response, Direction::DeviceToMac));

@@ -33,15 +33,22 @@ observed ROM behaviour or the TashTwenty firmware):
 3. The Controller Status characteristics byte must be `0xF6` (mountable,
    readable, writeable, ejectable, icon_included, disk_in_place) and the
    manufacturer `0x0100`, per the TashTwenty firmware.
-4. (Investigated) The Mac dictates the response group count in the command
-   header; the device's response size must match the command it is answering.
+4. The Mac dictates the response group count in the command header
+   (`resp_groups`); the device sends exactly that many groups (the TashTwenty
+   firmware copies `RC_RSPG` into its group count). The device now resizes its
+   response to that length and recomputes the trailing checksum so the shortened
+   payload stays valid.
 
-**Open issue blocking a full boot:** after the first status exchange the ROM
-issues a second `0x03` command with a non-standard 28-byte (4-group) payload and
-`resp_groups=1`, whose semantics are not yet understood (it is not the documented
-7-byte status request). Until that command is answered correctly the ROM does
-not progress to block reads. Resolving it likely needs the ROM's DCD driver
-disassembly or a fuller protocol reference than the public notes provide.
+**Open issue blocking a full boot:** after the first full status exchange the
+ROM issues a second `0x03` command with a non-standard 28-byte (4-group) payload
+and `resp_groups=1`. Even when answered with a correctly-sized, valid-checksum
+1-group response, the ROM still does not progress to block reads — so the
+blocker is the *content* of that response (or an earlier status field the ROM
+validates), not the framing. Pinning it down needs the ROM's DCD driver
+disassembly or the exact HD20 status/identify field values, which the public
+protocol notes do not fully provide. The handshake, codec, detection, command
+decode and paced response readback are all confirmed working against the real
+ROM; this last step is content/semantics, not mechanism.
 
 ## Summary
 
