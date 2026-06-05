@@ -1,52 +1,36 @@
-//! Directly Connected Disk (DCD) protocol engine — Apple Hard Disk 20 (HD20)
+//! Directly Connected Disk (DCD) protocol - Apple Hard Disk 20
 //!
-//! This is the self-contained protocol core (the "Phase 1" deliverable from
-//! `docs/HD20-FEASIBILITY.md`): the 7-to-8 codec, packet framing, checksum and
-//! the command/response handlers for read, write and device-identify, plus
-//! canned-success stubs for controller-status, format and verify. It is driven
-//! entirely by byte streams and has no SWIM/bus wiring yet — that handshake
-//! integration is the next phase.
-//!
-//! The byte-level layout follows the reverse-engineered DCD specification
-//! collected at <https://github.com/lampmerchant/tashnotes> (the
-//! `macintosh/floppy/dcd` notes). Where the spec leaves a value unspecified
-//! (e.g. the exact identity/geometry bytes a picky ROM driver might check) the
-//! choice is marked as a placeholder to validate once a real ROM driver is
-//! exercised against it.
-#![allow(dead_code)] // Wired into `Swim` in the next phase.
+//! Protocol details from the reverse-engineered notes at
+//! <https://github.com/lampmerchant/tashnotes> (macintosh/floppy/dcd).
+#![allow(dead_code)] // Not yet wired into the bus.
 
 use anyhow::{Result, bail};
 
 use crate::mac::scsi::disk_image::DiskImage;
 
-/// OS-visible data bytes per block.
+/// OS-visible data bytes per block
 pub const DCD_DATA_SIZE: usize = 512;
-/// Tag bytes per block (Lisa-derived; unused by Mac OS — stored as zeros).
+/// Tag bytes per block (Lisa-derived, unused by Mac OS)
 pub const DCD_TAG_SIZE: usize = 20;
-/// Full logical block size carried on the wire (tags + data).
-pub const DCD_BLOCK_SIZE: usize = DCD_TAG_SIZE + DCD_DATA_SIZE; // 532
+/// Logical block size on the wire (tags + data)
+pub const DCD_BLOCK_SIZE: usize = DCD_TAG_SIZE + DCD_DATA_SIZE;
 
-/// Sync byte that opens every transfer in both directions.
+/// Sync byte opening every transfer in both directions
 const SYNC: u8 = 0xAA;
-/// The two length bytes in the Mac→device header are biased by this (the IWM
-/// requires the MSb of every transmitted byte to be set).
+/// Bias applied to the Mac->device length header bytes (IWM requires MSb set)
 const LEN_BIAS: u8 = 0x80;
 
-/// Direction of a 7-to-8 encoded transfer. This only affects where the
-/// collected-LSb byte sits within each 8-byte group.
+/// Position of the collected-LSb byte within each 7-to-8 group
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Direction {
-    /// LSb byte precedes the seven shifted bytes.
+    /// LSb byte precedes the seven shifted bytes
     MacToDevice,
-    /// LSb byte follows the seven shifted bytes.
+    /// LSb byte follows the seven shifted bytes
     DeviceToMac,
 }
 
-/// Encodes seven payload bytes into one 8-byte group.
-///
-/// Each input byte is shifted right one bit with its MSb forced to 1; the seven
-/// displaced LSbs are gathered (most-significant first) into an eighth byte,
-/// also with its MSb forced to 1.
+/// Encodes seven bytes into an 8-byte group: each byte is shifted right with its
+/// MSb set, the displaced LSbs forming an eighth (MSb-set) byte.
 fn encode_group(seven: &[u8; 7]) -> (u8, [u8; 7]) {
     let mut shifted = [0u8; 7];
     let mut lsb = LEN_BIAS;
@@ -59,7 +43,6 @@ fn encode_group(seven: &[u8; 7]) -> (u8, [u8; 7]) {
     (lsb, shifted)
 }
 
-/// Inverse of [`encode_group`].
 fn decode_group(lsb: u8, shifted: &[u8; 7]) -> [u8; 7] {
     let mut out = [0u8; 7];
     for (i, slot) in out.iter_mut().enumerate() {
@@ -69,10 +52,9 @@ fn decode_group(lsb: u8, shifted: &[u8; 7]) -> [u8; 7] {
     out
 }
 
-/// 7-to-8 encodes a whole payload. The payload length must be a multiple of 7
-/// (every defined DCD payload is sized that way).
+/// 7-to-8 encodes a payload (length must be a multiple of 7).
 fn encode_payload(payload: &[u8], dir: Direction) -> Vec<u8> {
-    assert!(payload.len().is_multiple_of(7), "payload not a multiple of 7");
+    assert!(payload.len().is_multiple_of(7));
     let mut out = Vec::with_capacity(payload.len() / 7 * 8);
     for chunk in payload.chunks_exact(7) {
         let (lsb, shifted) = encode_group(&chunk.try_into().unwrap());
@@ -90,9 +72,8 @@ fn encode_payload(payload: &[u8], dir: Direction) -> Vec<u8> {
     out
 }
 
-/// Inverse of [`encode_payload`]. The encoded length must be a multiple of 8.
 fn decode_payload(groups: &[u8], dir: Direction) -> Vec<u8> {
-    assert!(groups.len().is_multiple_of(8), "group stream not a multiple of 8");
+    assert!(groups.len().is_multiple_of(8));
     let mut out = Vec::with_capacity(groups.len() / 8 * 7);
     for chunk in groups.chunks_exact(8) {
         let (lsb, shifted) = match dir {
@@ -104,39 +85,27 @@ fn decode_payload(groups: &[u8], dir: Direction) -> Vec<u8> {
     out
 }
 
-/// Returns the trailing checksum byte that makes the full payload sum to zero
-/// (mod 256).
-fn checksum_for(payload_without_checksum: &[u8]) -> u8 {
-    payload_without_checksum
-        .iter()
-        .fold(0u8, |acc, &b| acc.wrapping_sub(b))
+/// Checksum byte that makes the payload sum to zero (mod 256)
+fn checksum_for(payload: &[u8]) -> u8 {
+    payload.iter().fold(0u8, |acc, &b| acc.wrapping_sub(b))
 }
 
-/// Verifies that a payload (including its trailing checksum byte) sums to zero.
-fn verify_checksum(payload_with_checksum: &[u8]) -> bool {
-    payload_with_checksum
-        .iter()
-        .fold(0u8, |acc, &b| acc.wrapping_add(b))
-        == 0
+fn verify_checksum(payload: &[u8]) -> bool {
+    payload.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)) == 0
 }
 
-/// Appends the computed checksum byte to a payload being built.
+/// Appends the computed checksum byte to a payload
 fn finish_payload(mut payload: Vec<u8>) -> Vec<u8> {
     let cksum = checksum_for(&payload);
     payload.push(cksum);
     payload
 }
 
-/// A single Directly Connected Disk device (an emulated HD20).
-///
-/// Backed by any [`DiskImage`], so it shares the SCSI disk's file/mmap/writeback
-/// machinery and derives its capacity from the image size — nothing here fixes
-/// the size at 20 MB.
+/// A single Directly Connected Disk device (an HD20). Capacity is derived from
+/// the backing image, which also provides file/mmap/writeback.
 pub struct DcdDevice {
     image: Box<dyn DiskImage>,
-    /// Running sector index for a multi-packet write sequence. Set by the
-    /// initial write packet (which carries an address) and advanced by each
-    /// continuation packet (which does not).
+    /// Running sector for a multi-packet write sequence
     write_cursor: usize,
 }
 
@@ -148,14 +117,13 @@ impl DcdDevice {
         }
     }
 
-    /// Number of addressable 512-byte blocks, derived from the backing image.
+    /// Number of addressable 512-byte blocks
     pub fn block_count(&self) -> usize {
         self.image.byte_len() / DCD_DATA_SIZE
     }
 
-    /// Processes one complete Mac→device transfer (sync + length header +
-    /// encoded command groups) and returns the complete device→Mac reply
-    /// (sync + encoded response groups).
+    /// Processes a complete Mac->device transfer (sync + length header + groups)
+    /// and returns the device->Mac reply (sync + groups).
     pub fn process_request(&mut self, wire: &[u8]) -> Result<Vec<u8>> {
         if wire.first() != Some(&SYNC) {
             bail!("DCD request missing sync byte");
@@ -166,12 +134,7 @@ impl DcdDevice {
         let group_count = len_byte.wrapping_sub(LEN_BIAS) as usize;
         let groups = &wire[3..];
         if groups.len() != group_count * 8 {
-            bail!(
-                "DCD request length mismatch: header says {} groups ({} bytes), got {}",
-                group_count,
-                group_count * 8,
-                groups.len()
-            );
+            bail!("DCD request length mismatch");
         }
 
         let request = decode_payload(groups, Direction::MacToDevice);
@@ -180,15 +143,12 @@ impl DcdDevice {
         }
 
         let response = self.handle(&request)?;
-
         let mut out = Vec::with_capacity(1 + response.len() / 7 * 8);
         out.push(SYNC);
         out.extend(encode_payload(&response, Direction::DeviceToMac));
         Ok(out)
     }
 
-    /// Dispatches a decoded command payload to its handler, returning the
-    /// concatenated decoded response payload(s) (each with its own checksum).
     fn handle(&mut self, req: &[u8]) -> Result<Vec<u8>> {
         let opcode = *req.first().unwrap_or(&0xFF);
         match opcode {
@@ -196,15 +156,14 @@ impl DcdDevice {
             0x01 | 0x41 | 0x02 | 0x42 => self.handle_write(req, opcode),
             0x03 => Ok(self.handle_status()),
             0x04 => Ok(self.handle_read_id()),
-            // Format / verify-format: faked success, as TashTwenty does.
+            // Format / verify-format: faked success
             0x19 => Ok(self.status_only(0x99)),
             0x1A => Ok(self.status_only(0x9A)),
             other => bail!("unsupported DCD opcode {:#04x}", other),
         }
     }
 
-    /// Read Sectors (`0x00`). Device-driven: emits one 539-byte response
-    /// payload per requested sector, concatenated into a single transfer.
+    /// Read Sectors (0x00): one 539-byte response payload per sector
     fn handle_read(&self, req: &[u8]) -> Result<Vec<u8>> {
         if req.len() < 5 {
             bail!("DCD read request too short");
@@ -216,59 +175,48 @@ impl DcdDevice {
         for i in 0..count {
             let data = self.read_block(base + i);
             let mut p = Vec::with_capacity(DCD_BLOCK_SIZE + 7);
-            p.push(0x80); // response identifier
-            p.push((count - 1 - i) as u8); // sectors remaining (counts down to 0)
-            p.extend_from_slice(&[0, 0, 0, 0]); // status: success
-            p.extend_from_slice(&[0u8; DCD_TAG_SIZE]); // tags (synthesized zeros)
-            p.extend_from_slice(&data); // 512 data bytes
+            p.push(0x80); // identifier
+            p.push((count - 1 - i) as u8); // sectors remaining
+            p.extend_from_slice(&[0, 0, 0, 0]); // status
+            p.extend_from_slice(&[0u8; DCD_TAG_SIZE]); // tags
+            p.extend_from_slice(&data); // data
             out.extend(finish_payload(p));
         }
         Ok(out)
     }
 
-    /// Write Sectors (`0x01`/`0x41`) and Write & Verify (`0x02`/`0x42`). Each
-    /// request carries one sector; the reply is a short status payload.
+    /// Write Sectors (0x01/0x41) and Write & Verify (0x02/0x42)
     fn handle_write(&mut self, req: &[u8], opcode: u8) -> Result<Vec<u8>> {
         if req.len() < 6 + DCD_BLOCK_SIZE {
             bail!("DCD write request too short");
         }
         let remaining = req[1];
 
-        // 0x01/0x02 are the initial packets and carry the sector address;
-        // 0x41/0x42 are continuations that advance from the running cursor.
-        let initial = matches!(opcode, 0x01 | 0x02);
-        if initial {
+        // 0x01/0x02 carry the sector address; 0x41/0x42 continue from the cursor
+        if matches!(opcode, 0x01 | 0x02) {
             self.write_cursor = sector_addr(&req[2..5]);
         }
-
-        // Layout: [id, remaining, addr(3)/pad, pad, tags(20), data(512), cksum]
         let data_start = 6 + DCD_TAG_SIZE;
-        let data = &req[data_start..data_start + DCD_DATA_SIZE];
-        self.write_block(self.write_cursor, data);
+        self.write_block(self.write_cursor, &req[data_start..data_start + DCD_DATA_SIZE]);
         self.write_cursor += 1;
 
-        let base = if matches!(opcode, 0x02 | 0x42) {
-            0x02
-        } else {
-            0x01
-        };
-        let p = vec![0x80 | base, remaining, 0, 0, 0, 0];
-        Ok(finish_payload(p))
+        let base = if matches!(opcode, 0x02 | 0x42) { 0x02 } else { 0x01 };
+        Ok(finish_payload(vec![0x80 | base, remaining, 0, 0, 0, 0]))
     }
 
-    /// Read ID (`0x04`): 49-byte identity/geometry payload.
+    /// Read ID (0x04): 49-byte identity/geometry payload
     fn handle_read_id(&self) -> Vec<u8> {
         let blocks = self.block_count();
         let (cyl, heads, secs) = geometry(blocks);
 
         let mut p = Vec::with_capacity(49);
-        p.push(0x84); // response identifier
+        p.push(0x84); // identifier
         p.push(0x00);
         p.extend_from_slice(&[0, 0, 0, 0]); // status
-        p.extend_from_slice(DEVICE_NAME); // 13-byte name
-        p.extend_from_slice(&DEVICE_TYPE_ID); // 3-byte device type
-        p.extend_from_slice(&FIRMWARE_REV); // 2-byte firmware revision
-        p.extend_from_slice(&u24_be(blocks as u32)); // capacity in blocks
+        p.extend_from_slice(DEVICE_NAME); // name
+        p.extend_from_slice(&DEVICE_TYPE_ID); // device type
+        p.extend_from_slice(&FIRMWARE_REV); // firmware revision
+        p.extend_from_slice(&u24_be(blocks as u32)); // capacity (blocks)
         p.extend_from_slice(&(DCD_DATA_SIZE as u16).to_be_bytes()); // bytes/block
         p.extend_from_slice(&cyl.to_be_bytes()); // cylinders
         p.push(heads); // heads
@@ -280,30 +228,29 @@ impl DcdDevice {
         finish_payload(p)
     }
 
-    /// Controller Status (`0x03`): 343-byte payload. Mostly canned; the icon and
-    /// most metadata are zeroed (the OS does not require them for normal use).
+    /// Controller Status (0x03): 343-byte payload, mostly canned
     fn handle_status(&self) -> Vec<u8> {
         let mut p = Vec::with_capacity(343);
-        p.push(0x83); // response identifier
+        p.push(0x83); // identifier
         p.push(0x00);
         p.extend_from_slice(&[0, 0, 0, 0]); // status
-        p.extend_from_slice(&DEVICE_TYPE); // device type (2)
-        p.extend_from_slice(&MANUFACTURER); // manufacturer (2)
-        p.push(0x00); // characteristics bit field
-        p.extend_from_slice(&u24_be(self.block_count() as u32)); // number of blocks
+        p.extend_from_slice(&DEVICE_TYPE); // device type
+        p.extend_from_slice(&MANUFACTURER); // manufacturer
+        p.push(0x00); // characteristics
+        p.extend_from_slice(&u24_be(self.block_count() as u32)); // blocks
         p.extend_from_slice(&[0, 0]); // spare blocks
         p.extend_from_slice(&[0, 0]); // bad blocks
         p.extend_from_slice(&[0u8; 52]); // manufacturer reserved
-        p.extend_from_slice(&[0u8; 128]); // icon (32x32)
-        p.extend_from_slice(&[0u8; 128]); // icon mask (32x32)
+        p.extend_from_slice(&[0u8; 128]); // icon
+        p.extend_from_slice(&[0u8; 128]); // icon mask
         p.push(0x00); // location string length
         p.extend_from_slice(&[0u8; 15]); // location string
         finish_payload(p)
     }
 
-    /// Minimal success reply for commands we fake (format / verify).
-    fn status_only(&self, response_id: u8) -> Vec<u8> {
-        finish_payload(vec![response_id, 0x00, 0, 0, 0, 0])
+    /// Minimal success reply for faked commands
+    fn status_only(&self, identifier: u8) -> Vec<u8> {
+        finish_payload(vec![identifier, 0x00, 0, 0, 0, 0])
     }
 
     fn read_block(&self, sector: usize) -> Vec<u8> {
@@ -323,38 +270,31 @@ impl DcdDevice {
     }
 }
 
-/// Reads a 3-byte big-endian sector address.
+/// 3-byte big-endian sector address
 fn sector_addr(b: &[u8]) -> usize {
     ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | (b[2] as usize)
 }
 
-/// Encodes a value as 3 big-endian bytes (saturating at the 24-bit ceiling).
+/// Value as 3 big-endian bytes, saturating at the 24-bit ceiling
 fn u24_be(v: u32) -> [u8; 3] {
     let v = v.min(0x00FF_FFFF);
     [(v >> 16) as u8, (v >> 8) as u8, v as u8]
 }
 
-/// Synthesizes a plausible (cylinders, heads, sectors) geometry for a given
-/// block count. The OS uses the block count for HFS; CHS is advisory.
+/// Synthesizes (cylinders, heads, sectors) for a block count. The OS uses the
+/// block count for HFS; CHS is advisory.
 fn geometry(blocks: usize) -> (u16, u8, u8) {
     const HEADS: usize = 16;
     const SECTORS: usize = 32;
-    let per_cyl = HEADS * SECTORS;
-    let cyl = blocks.div_ceil(per_cyl).min(u16::MAX as usize) as u16;
+    let cyl = blocks.div_ceil(HEADS * SECTORS).min(u16::MAX as usize) as u16;
     (cyl, HEADS as u8, SECTORS as u8)
 }
 
-// --- Identity placeholders (validate against a real ROM driver later) ---
-
-/// 13-byte device name reported by Read ID.
+// Identity values, to be confirmed against a real ROM driver.
 const DEVICE_NAME: &[u8; 13] = b"Snow HD20    ";
-/// 3-byte device type reported by Read ID.
 const DEVICE_TYPE_ID: [u8; 3] = [0x00, 0x00, 0x01];
-/// 2-byte firmware revision reported by Read ID.
 const FIRMWARE_REV: [u8; 2] = [0x00, 0x01];
-/// 2-byte device type reported by Controller Status.
 const DEVICE_TYPE: [u8; 2] = [0x00, 0x01];
-/// 2-byte manufacturer reported by Controller Status.
 const MANUFACTURER: [u8; 2] = [0x00, 0x01];
 
 #[cfg(test)]
@@ -362,7 +302,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// In-memory [`DiskImage`] for tests.
     struct MemDisk(Vec<u8>);
 
     impl DiskImage for MemDisk {
@@ -387,7 +326,6 @@ mod tests {
         DcdDevice::new(Box::new(MemDisk(vec![0u8; n * DCD_DATA_SIZE])))
     }
 
-    /// Builds a complete Mac→device transfer from a decoded command payload.
     fn frame_request(payload: &[u8], expected_response_groups: usize) -> Vec<u8> {
         let groups = payload.len() / 7;
         let mut out = vec![
@@ -399,7 +337,6 @@ mod tests {
         out
     }
 
-    /// Decodes a device→Mac transfer back to the concatenated response payload.
     fn unframe_response(wire: &[u8]) -> Vec<u8> {
         assert_eq!(wire[0], SYNC);
         decode_payload(&wire[1..], Direction::DeviceToMac)
@@ -407,7 +344,6 @@ mod tests {
 
     #[test]
     fn encode_group_matches_spec_example() {
-        // The worked example from the DCD protocol notes.
         let input = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
         let (lsb, shifted) = encode_group(&input);
         assert_eq!(lsb, 0b1101_0101);
@@ -457,7 +393,6 @@ mod tests {
     #[test]
     fn read_returns_block_data() {
         let mut dev = device_with_blocks(4);
-        // Seed sector 2 with a recognizable pattern.
         let pattern: Vec<u8> = (0..DCD_DATA_SIZE).map(|i| (i * 7 + 1) as u8).collect();
         dev.image.write_bytes(2 * DCD_DATA_SIZE, &pattern);
 
@@ -466,8 +401,8 @@ mod tests {
 
         assert_eq!(resp.len(), DCD_BLOCK_SIZE + 7);
         assert!(verify_checksum(&resp));
-        assert_eq!(resp[0], 0x80); // response identifier
-        assert_eq!(resp[1], 0); // remaining counts down to 0
+        assert_eq!(resp[0], 0x80);
+        assert_eq!(resp[1], 0);
         let data = &resp[6 + DCD_TAG_SIZE..6 + DCD_TAG_SIZE + DCD_DATA_SIZE];
         assert_eq!(data, &pattern[..]);
     }
@@ -498,7 +433,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(verify_checksum(&wresp));
-        assert_eq!(wresp[0], 0x81); // write response identifier
+        assert_eq!(wresp[0], 0x81);
 
         let rresp = unframe_response(
             &dev.process_request(&frame_request(&finish_payload(vec![0x00, 1, 0, 0, 3, 0]), 77))
@@ -518,11 +453,9 @@ mod tests {
         assert_eq!(resp.len(), 49);
         assert!(verify_checksum(&resp));
         assert_eq!(resp[0], 0x84);
-        // Capacity field (offset 24..27) is the block count, big-endian 24-bit.
         let cap = sector_addr(&resp[24..27]);
         assert_eq!(cap, dev.block_count());
         assert_eq!(cap, 40960);
-        // Bytes-per-block (offset 27..29).
         assert_eq!(u16::from_be_bytes([resp[27], resp[28]]) as usize, DCD_DATA_SIZE);
     }
 
@@ -537,7 +470,7 @@ mod tests {
     fn bad_checksum_rejected() {
         let mut dev = device_with_blocks(2);
         let mut payload = finish_payload(vec![0x00, 1, 0, 0, 0, 0]);
-        *payload.last_mut().unwrap() ^= 0xFF; // corrupt checksum
+        *payload.last_mut().unwrap() ^= 0xFF;
         let req = frame_request(&payload, 77);
         assert!(dev.process_request(&req).is_err());
     }
