@@ -125,7 +125,7 @@ emulation.
 | Snow model | ROM | HD20 viable? | Requirements |
 |---|---|---|---|
 | Early128K | 64K | No | Insufficient RAM for HFS |
-| Early512K | 64K | Awkward | DCD emulation **plus** an HD20 Startup floppy (System 2.1/Finder 5.0); HFS only; not bootable from HD20 |
+| Early512K | 64K | Yes, via boot floppy | DCD emulation **plus** an HD20 Startup floppy (System 2.1+); HFS only; see below |
 | **Early512Ke** | 128K | Yes (clean) | DCD emulation only; boots directly from HD20 |
 | **Plus** | 128K | Yes (clean) | DCD emulation only (also has SCSI as an alternative) |
 
@@ -142,6 +142,75 @@ HD20/HFS support, and direct boot — and should be the first target. The 512K
 Startup software and confines the user to System 2.1+/HFS. The 128K and the
 System 1.0–2.0 / MFS world are out of scope by hardware design, not by any
 emulation limitation.
+
+### The 64K-ROM floppy-boot path (Macintosh 512K)
+
+Booting via the HD20 Startup floppy is a perfectly acceptable target, and the
+encouraging finding is that **it requires essentially no DCD-specific emulation
+work beyond the device itself** — the DCD device is ROM-agnostic, so a driver
+loaded from a floppy drives it identically to one baked into a 128K ROM.
+
+**How the real boot works:**
+
+1. The machine cold-boots from the **HD20 Startup floppy** in the *internal*
+   drive. This is an ordinary **400K MFS** disk (it has to boot on a stock
+   400K-drive, 64K-ROM machine) carrying **System 2.1 / Finder 5.0 or later**
+   plus the special **"Hard Disk 20"** system file.
+2. Early in startup — right after the ROM trap patches are installed — the
+   System loads and executes the "Hard Disk 20" file (in System 3.0–4.1 this is
+   driven by `PTCH` resource ID 105). That file installs, **into RAM**, an
+   improved Sony floppy driver (adding 800K support) **and a RAM-based HFS**,
+   along with the DCD/HD20 driver.
+3. With HFS and the DCD driver now resident, the driver probes the *external*
+   floppy port, finds the HD20, and mounts it. The "Hard Disk 20 Startup"
+   banner appears under "Welcome to Macintosh" and the **startup floppy is
+   ejected automatically**. If the HD20 carries a valid System Folder, the boot
+   hands off to it (switch-launch); otherwise the HD20 simply appears as a data
+   volume on the desktop.
+
+Because the patches live in volatile RAM, the **startup floppy must be inserted
+at every cold boot** — but it self-ejects once it has done its job, so it isn't
+occupying the drive afterward.
+
+**What Snow needs for this path:**
+
+* **The DCD device on the external port** — the same core work as for the
+  512Ke/Plus; nothing ROM-specific. The device responds to phase-line stimuli
+  whether they originate from ROM code or from the floppy-loaded driver.
+* **Booting a 400K MFS floppy from the internal drive** — already fully
+  supported; the HD20 Startup disk is just a normal bootable 400K image.
+* **Automatic eject after load** — already supported by the existing SWIM eject
+  logic; the floppy-loaded driver issues the eject exactly as any software does.
+* **Mark the 512K as DCD-capable** — add it to the per-model capability flag so
+  an HD20 can be attached. (The 128K stays excluded — insufficient RAM for HFS.)
+* **No external-port contention in this scenario** — the startup floppy sits in
+  the *internal* drive (index 0) while the HD20 sits on the *external* port
+  (index 1), so the two never collide. (If a real external floppy is also
+  daisy-chained behind the HD20, the SWIM routes to the DCD device only in DCD
+  phase-line states and otherwise falls through to the external `FloppyDrive`,
+  per the integration approach below.)
+
+**User-facing flow in Snow (512K):**
+
+1. Attach an HD20 image (HFS) to the external port.
+2. Insert an **HD20 Startup floppy image** (400K MFS, System 2.1+, with the
+   "Hard Disk 20" file) into the internal drive. This image is freely available
+   (e.g. Apple's old software archives / Macintosh Repository); Snow could link
+   to or optionally bundle it to make setup painless.
+3. Boot. The floppy loads the driver, the HD20 mounts and the floppy ejects.
+
+The net engineering cost of the 512K path over the 512Ke/Plus path is therefore
+small: a capability-flag entry plus documentation/packaging of the startup
+floppy. The hard part (the DCD device) is shared.
+
+**Capacity note for the Infinite Mac collection.** The DCD command set
+addresses sectors with a 3-byte (big-endian) sector number, so the protocol
+ceiling is ~2^24 × 512 B ≈ 8 GB; the real HD20 is 20 MB and period software
+expects something in that range. Snow can advertise a larger geometry via the
+identify/status responses, but how much an era-appropriate HFS + the
+RAM-resident driver will tolerate is a separate question to validate — a single
+DCD volume is unlikely to hold the *entire* collection, so think of it as a
+generously sized working disk rather than a mount of the whole library.
 
 ## How Snow models the relevant hardware today
 
@@ -271,15 +340,17 @@ to the flux engine.
   with a single device on Plus/512Ke and expand.
 * Need a DCD-aware ROM image to test against (the targeted models have it).
 
-**Recommendation:** Proceed, scoped to a **single HD20 on the 512Ke / Plus**
-(128K-ROM machines) first, implementing read/write/identify with stubbed
-status/format and a flat HFS backing image. These boot directly from the HD20
-with no extra software, so this validates all the integration hook points with
-the least moving parts; daisy-chaining and the 512K (64K-ROM, HD20-Startup-floppy)
-path can follow. For the Infinite Mac goal of attaching a large software
-collection to a compact Mac, the **512Ke is the recommended host** — it pairs
-native HD20/HFS support with the small-machine experience. Note this inherently
-means HFS and System 2.1+; the 128K and pre-HFS System 1.0–2.0 are out of scope
-by hardware/OS design. The clean IWM/SWIM abstraction already present in Snow
-makes this an additive change confined to `core/src/mac/swim/` plus a small
-amount of config and UI glue.
+**Recommendation:** Proceed, scoped to a **single HD20** first, implementing
+read/write/identify with stubbed status/format and a flat HFS backing image.
+Bring up and validate on the **512Ke / Plus** (128K-ROM) — they boot directly
+from the HD20 with no extra software, so they exercise all the integration hook
+points with the fewest moving parts. The **512K (64K-ROM) floppy-boot path is a
+cheap follow-on**: once the DCD device works, the 512K needs only a
+capability-flag entry and a user-supplied HD20 Startup floppy (System 2.1+),
+because the floppy-loaded driver drives the same device. Daisy-chaining can come
+later. For the Infinite Mac goal, the **512Ke is the smoothest host** (native,
+no boot floppy), with the 512K as a fully viable alternative for users who want
+the stock 64K-ROM machine. All paths inherently mean HFS and System 2.1+; the
+128K and pre-HFS System 1.0–2.0 are out of scope by hardware/OS design. The
+clean IWM/SWIM abstraction already present in Snow makes this an additive change
+confined to `core/src/mac/swim/` plus a small amount of config and UI glue.
