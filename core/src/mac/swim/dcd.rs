@@ -270,6 +270,155 @@ impl DcdDevice {
     }
 }
 
+/// Stage of a DCD handshake transfer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    /// State 2, nothing in flight
+    Idle,
+    /// HOST asserted, device ready to receive a command
+    ReadyToReceive,
+    /// State 1, collecting command bytes from the Mac
+    Receiving,
+    /// Command processed, response queued, waiting for the Mac to read it
+    ResponseReady,
+    /// State 1, streaming the response to the Mac
+    Sending,
+}
+
+/// Drives the phase-line handshake around a [`DcdDevice`], bracketing each
+/// command/response transfer. The IWM wiring feeds it the phase-line state and
+/// the command/response bytes; the byte clocking is handled one byte per IWM
+/// data-register access rather than at bit granularity.
+///
+/// The handshake transitions follow the reverse-engineered protocol notes and
+/// are exercised by the unit tests below, but the exact polarity and driver
+/// loop behaviour still need confirming against a real ROM driver.
+pub struct DcdController {
+    device: DcdDevice,
+    /// Phase-line state (0-7) decoded from CA2/CA1/CA0
+    state: u8,
+    stage: Stage,
+    /// True while the device asserts !HSHK
+    hshk: bool,
+    rx: Vec<u8>,
+    tx: Vec<u8>,
+    tx_pos: usize,
+}
+
+impl DcdController {
+    /// Idle phase-line state (CA2=0 CA1=1 CA0=0)
+    const STATE_IDLE: u8 = 2;
+
+    pub fn new(device: DcdDevice) -> Self {
+        Self {
+            device,
+            state: Self::STATE_IDLE,
+            stage: Stage::Idle,
+            hshk: false,
+            rx: Vec::new(),
+            tx: Vec::new(),
+            tx_pos: 0,
+        }
+    }
+
+    /// Updates the phase-line state and advances the handshake on a change.
+    pub fn update_phase(&mut self, ca2: bool, ca1: bool, ca0: bool) {
+        let new = ((ca2 as u8) << 2) | ((ca1 as u8) << 1) | (ca0 as u8);
+        if new == self.state {
+            return;
+        }
+        self.state = new;
+
+        // RESET: power-on-equivalent reset.
+        if new == 4 {
+            self.go_idle();
+            return;
+        }
+
+        match (self.stage, new) {
+            // Mac asserts HOST (2->3) to start sending a command.
+            (Stage::Idle, 3) => {
+                self.rx.clear();
+                self.hshk = true;
+                self.stage = Stage::ReadyToReceive;
+            }
+            // Mac begins the data transfer (3->1).
+            (Stage::ReadyToReceive, 1) => self.stage = Stage::Receiving,
+            // Mac signals end of command (1->3): process and queue the response.
+            (Stage::Receiving, 3) => self.process(),
+            // Mac is back in idle awaiting the response: assert !HSHK if ready.
+            (Stage::ResponseReady, 2) => self.hshk = !self.tx.is_empty(),
+            // Mac begins reading the response (->1).
+            (Stage::ResponseReady, 1) => {
+                self.stage = Stage::Sending;
+                self.tx_pos = 0;
+            }
+            // Response fully read.
+            (Stage::Sending, 2) | (Stage::Sending, 3) => self.go_idle(),
+            // Any other return to idle resets the handshake (e.g. the Mac's
+            // startup detection walk passing through transfer states).
+            (_, 2) => self.go_idle(),
+            _ => {}
+        }
+    }
+
+    fn process(&mut self) {
+        if self.rx.first() == Some(&SYNC) && self.rx.len() >= 3 {
+            self.tx = self.device.process_request(&self.rx).unwrap_or_default();
+        } else {
+            self.tx.clear();
+        }
+        self.tx_pos = 0;
+        self.hshk = false;
+        self.stage = if self.tx.is_empty() {
+            Stage::Idle
+        } else {
+            Stage::ResponseReady
+        };
+    }
+
+    fn go_idle(&mut self) {
+        self.rx.clear();
+        self.tx.clear();
+        self.tx_pos = 0;
+        self.hshk = false;
+        self.stage = Stage::Idle;
+    }
+
+    /// RD-line level the Mac reads via the IWM status SENSE bit. !HSHK is active
+    /// low, so an asserted handshake reads low.
+    pub fn sense(&self) -> bool {
+        match self.state {
+            2 | 3 => !self.hshk,
+            5 => false,    // detection: drive low
+            6 | 7 => true, // detection: drive high
+            _ => true,
+        }
+    }
+
+    pub fn is_receiving(&self) -> bool {
+        self.stage == Stage::Receiving
+    }
+
+    pub fn is_sending(&self) -> bool {
+        self.stage == Stage::Sending
+    }
+
+    /// Accepts one command byte clocked out by the Mac.
+    pub fn write_data(&mut self, byte: u8) {
+        self.rx.push(byte);
+    }
+
+    /// Returns the next response byte for the Mac to read.
+    pub fn read_data(&mut self) -> u8 {
+        let b = self.tx.get(self.tx_pos).copied().unwrap_or(0);
+        if self.tx_pos < self.tx.len() {
+            self.tx_pos += 1;
+        }
+        b
+    }
+}
+
 /// 3-byte big-endian sector address
 fn sector_addr(b: &[u8]) -> usize {
     ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | (b[2] as usize)
@@ -340,6 +489,111 @@ mod tests {
     fn unframe_response(wire: &[u8]) -> Vec<u8> {
         assert_eq!(wire[0], SYNC);
         decode_payload(&wire[1..], Direction::DeviceToMac)
+    }
+
+    fn controller(blocks: usize) -> DcdController {
+        DcdController::new(device_with_blocks(blocks))
+    }
+
+    /// Drives a full command through the controller following the documented
+    /// phase-line handshake, returning the device's response wire bytes.
+    fn run_command(c: &mut DcdController, frame: &[u8]) -> Vec<u8> {
+        // Mac -> device.
+        c.update_phase(false, true, true); // state 3: assert HOST
+        assert!(!c.sense(), "device should assert !HSHK (reads low)");
+        c.update_phase(false, false, true); // state 1: data transfer
+        assert!(c.is_receiving());
+        for &b in frame {
+            c.write_data(b);
+        }
+        c.update_phase(false, true, true); // state 3: end of command
+        assert!(c.sense(), "device should deassert !HSHK after receiving");
+        c.update_phase(false, true, false); // state 2: await response
+
+        // Device -> Mac.
+        let has_response = !c.sense();
+        c.update_phase(false, true, true); // state 3
+        c.update_phase(false, false, true); // state 1: read response
+        let mut out = Vec::new();
+        if has_response {
+            assert!(c.is_sending());
+            // Response wire bytes always have their MSb set, so a zero marks the
+            // end of the queued response.
+            loop {
+                let b = c.read_data();
+                if b == 0 {
+                    break;
+                }
+                out.push(b);
+            }
+        }
+        c.update_phase(false, true, false); // state 2: done
+        out
+    }
+
+    #[test]
+    fn controller_read_id_roundtrips() {
+        let mut c = controller(40960);
+        let frame = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
+        let resp = unframe_response(&run_command(&mut c, &frame));
+        assert_eq!(resp[0], 0x84);
+        assert_eq!(sector_addr(&resp[24..27]), 40960);
+    }
+
+    #[test]
+    fn controller_read_roundtrips() {
+        let mut c = controller(4);
+        let pattern: Vec<u8> = (0..DCD_DATA_SIZE).map(|i| (i * 3 + 5) as u8).collect();
+        c.device.image.write_bytes(DCD_DATA_SIZE, &pattern); // sector 1
+
+        let frame = frame_request(&finish_payload(vec![0x00, 1, 0, 0, 1, 0]), 77);
+        let resp = unframe_response(&run_command(&mut c, &frame));
+        assert_eq!(resp[0], 0x80);
+        let data = &resp[6 + DCD_TAG_SIZE..6 + DCD_TAG_SIZE + DCD_DATA_SIZE];
+        assert_eq!(data, &pattern[..]);
+    }
+
+    #[test]
+    fn controller_detection_sense_levels() {
+        let mut c = controller(2);
+        c.update_phase(true, false, true); // state 5
+        assert!(!c.sense());
+        c.update_phase(true, true, false); // state 6
+        assert!(c.sense());
+        c.update_phase(true, true, true); // state 7
+        assert!(c.sense());
+    }
+
+    #[test]
+    fn controller_recovers_after_detection_walk() {
+        let mut c = controller(8);
+        // Mimic a one-line-at-a-time walk into the detection states that passes
+        // through transfer states, then returns to idle.
+        for (ca2, ca1, ca0) in [
+            (false, true, true),  // 3
+            (false, false, true), // 1
+            (true, false, true),  // 5
+            (false, false, true), // 1
+            (false, true, true),  // 3
+            (false, true, false), // 2 (idle)
+        ] {
+            c.update_phase(ca2, ca1, ca0);
+        }
+        // A real command still works afterwards.
+        let frame = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
+        let resp = unframe_response(&run_command(&mut c, &frame));
+        assert_eq!(resp[0], 0x84);
+    }
+
+    #[test]
+    fn controller_reset_clears_transfer() {
+        let mut c = controller(4);
+        c.update_phase(false, true, true); // state 3
+        c.update_phase(false, false, true); // state 1
+        c.write_data(SYNC);
+        c.update_phase(true, false, false); // state 4: RESET
+        assert!(!c.is_receiving());
+        assert!(!c.is_sending());
     }
 
     #[test]

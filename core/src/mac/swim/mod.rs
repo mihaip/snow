@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use anyhow::{Result, bail};
 use ism::{IsmError, IsmSetup, IsmStatus};
 
+use dcd::DcdController;
 use drive::{DriveType, FloppyDrive};
 use iwm::{IwmMode, IwmStatus};
 use serde::{Deserialize, Serialize};
@@ -144,6 +145,10 @@ pub struct Swim {
 
     pub(crate) drives: [FloppyDrive; 3],
 
+    /// DCD (Hard Disk 20) device on the external floppy port, if attached
+    #[serde(skip)]
+    dcd: Option<DcdController>,
+
     pub dbg_pc: u32,
     pub dbg_break: LatchingEvent,
 }
@@ -202,6 +207,7 @@ impl Swim {
             ism_write_prev_bit: false,
 
             enable: false,
+            dcd: None,
             dbg_pc: 0,
             dbg_break: LatchingEvent::default(),
         }
@@ -231,6 +237,17 @@ impl Swim {
 
     pub fn is_writing(&self) -> bool {
         self.write_buffer.is_some()
+    }
+
+    /// Attaches a DCD (Hard Disk 20) device on the external port.
+    #[allow(dead_code)] // Exposed to the frontend in a later phase.
+    pub fn attach_dcd(&mut self, image: Box<dyn crate::mac::scsi::disk_image::DiskImage>) {
+        self.dcd = Some(DcdController::new(dcd::DcdDevice::new(image)));
+    }
+
+    /// True when a DCD device is selected (external port with a device attached).
+    fn dcd_selected(&self) -> bool {
+        self.extdrive && self.dcd.is_some()
     }
 
     fn get_selected_drive(&self) -> &FloppyDrive {
@@ -430,5 +447,77 @@ impl Debuggable for Swim {
                 self.drives[2]
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    struct MemDisk(Vec<u8>);
+    impl crate::mac::scsi::disk_image::DiskImage for MemDisk {
+        fn byte_len(&self) -> usize {
+            self.0.len()
+        }
+        fn read_bytes(&self, offset: usize, length: usize) -> Vec<u8> {
+            self.0[offset..offset + length].to_vec()
+        }
+        fn write_bytes(&mut self, offset: usize, data: &[u8]) {
+            self.0[offset..offset + data.len()].copy_from_slice(data);
+        }
+        fn media_bytes(&self) -> Option<&[u8]> {
+            Some(&self.0)
+        }
+        fn image_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    /// IWM register access address for the given line (bits A9-A12 select it).
+    fn reg(action: u16) -> Address {
+        (action as Address) << 9
+    }
+
+    /// Reads the IWM status register SENSE bit (bit 7).
+    fn read_sense_bit(swim: &mut Swim) -> bool {
+        swim.write(reg(13), 0); // q6 on
+        swim.write(reg(14), 0); // q7 off
+        swim.read(reg(13)).unwrap() & 0x80 != 0
+    }
+
+    fn swim_with_dcd() -> Swim {
+        let mut swim = Swim::new(&[DriveType::GCR800K, DriveType::GCR800K], false, 8_000_000);
+        swim.attach_dcd(Box::new(MemDisk(vec![0u8; 512 * 64])));
+        swim.write(reg(11), 0); // external port
+        swim.write(reg(9), 0); // enable
+        swim
+    }
+
+    /// The DCD device is detected via the phase-line probe states: the device
+    /// drives RD low in state 5 and high in states 6 and 7.
+    #[test]
+    fn dcd_detection_sense_via_bus() {
+        let mut swim = swim_with_dcd();
+
+        // State 6 (CA2=1 CA1=1 CA0=0): sense high.
+        swim.write(reg(5), 0); // CA2 on
+        swim.write(reg(3), 0); // CA1 on
+        swim.write(reg(0), 0); // CA0 off
+        assert!(read_sense_bit(&mut swim));
+
+        // State 5 (CA2=1 CA1=0 CA0=1): sense low.
+        swim.write(reg(2), 0); // CA1 off
+        swim.write(reg(1), 0); // CA0 on
+        assert!(!read_sense_bit(&mut swim));
+    }
+
+    /// Without the external port selected, status reads fall through to the
+    /// floppy drive and the DCD device is not consulted.
+    #[test]
+    fn dcd_inactive_on_internal_port() {
+        let mut swim = swim_with_dcd();
+        swim.write(reg(10), 0); // internal port
+        assert!(!swim.dcd_selected());
     }
 }

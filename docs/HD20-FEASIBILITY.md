@@ -1,9 +1,12 @@
 # Feasibility: HD20 (DCD) emulation in Snow
 
-Status: investigation / design note. Phase 1 (the protocol core) and the
-backing-store abstraction from Phase 0 are implemented and unit-tested in
-`core/src/mac/swim/dcd.rs`; the remaining phases (SWIM handshake integration,
-config/UI, broader machine coverage) are not yet started.
+Status: investigation / design note. Phase 0 (backing-store abstraction),
+Phase 1 (protocol core) and Phase 2 (SWIM handshake state machine + IWM wiring)
+are implemented and unit-tested in `core/src/mac/swim/`. The Phase 2 handshake
+is verified for self-consistency by unit tests but has **not** yet been
+validated against a real DCD-aware ROM driver (no such ROM is available in the
+build environment). The remaining phases (config/UI, broader machine coverage,
+daisy-chaining, persistence) are not yet started.
 
 ## Summary
 
@@ -400,7 +403,23 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   `write_buffer` while a transfer is active, bypassing the `iwm_tick` flux path.
 * **Deliverable:** a real DCD-aware ROM (512Ke or Plus) probes, identifies,
   reads and writes the device. This is the hard, debugging-heavy milestone;
-  everything after is breadth.
+  everything after is breadth. *(Implemented — `DcdController` in
+  `swim/dcd.rs` drives the phase-line handshake (HOST/HOFF/RESET, !HSHK,
+  detection states) around the Phase 1 engine; `Swim`/`iwm.rs` route phase
+  changes, the SENSE bit and the data register to it when the external port has
+  a DCD device. Covered by controller-level and bus-level unit tests. Still
+  needs validation against a real ROM driver: the !HSHK polarity, the exact
+  receive/process/send transitions and the byte-per-data-register-access
+  clocking are best-effort readings of the reverse-engineered spec.)*
+
+  Assumptions baked into the wiring, to confirm against real software:
+  - Byte transfer is modelled one byte per IWM data-register access rather than
+    bit-by-bit at a fixed cell rate; this assumes the driver reads exactly the
+    expected byte count rather than spin-waiting on the sync byte.
+  - !HSHK is treated as active-low on the SENSE bit; detection drives RD low in
+    state 5 and high in states 6/7.
+  - The DCD device claims the external port whenever one is attached and
+    `extdrive` is selected (a daisy-chained external floppy is Phase 6).
 
 ### Phase 3 — Configuration & UI
 

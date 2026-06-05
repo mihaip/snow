@@ -124,6 +124,12 @@ impl Swim {
             15 => self.q7 = true,
             _ => (),
         }
+
+        // Drive the DCD handshake when the external port has a device attached.
+        if self.dcd_selected() {
+            let (ca2, ca1, ca0) = (self.ca2, self.ca1, self.ca0);
+            self.dcd.as_mut().unwrap().update_phase(ca2, ca1, ca0);
+        }
     }
 
     /// Read on the bus
@@ -135,7 +141,9 @@ impl Swim {
         let val = match (self.q6, self.q7) {
             (false, false) => {
                 // Data register
-                if !self.enable {
+                if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
+                    self.dcd.as_mut().unwrap().read_data()
+                } else if !self.enable {
                     0xFF
                 } else {
                     std::mem::replace(&mut self.datareg, 0)
@@ -143,9 +151,12 @@ impl Swim {
             }
             (true, false) => {
                 // Read status register
-                let sense = self
-                    .get_selected_drive()
-                    .read_sense(self.get_selected_drive_reg_u8());
+                let sense = if self.dcd_selected() {
+                    self.dcd.as_ref().unwrap().sense()
+                } else {
+                    self.get_selected_drive()
+                        .read_sense(self.get_selected_drive_reg_u8())
+                };
                 self.iwm_status.set_sense(sense);
                 self.iwm_status.set_mode_low(self.iwm_mode.mode_low());
                 self.iwm_status.set_enable(self.enable);
@@ -199,10 +210,14 @@ impl Swim {
                 self.iwm_mode.set_mode(value);
             }
             (true, true, true) => {
-                if self.write_buffer.is_some() {
-                    warn!("Disk write while write buffer not empty");
+                if self.dcd_selected() && self.dcd.as_ref().unwrap().is_receiving() {
+                    self.dcd.as_mut().unwrap().write_data(value);
+                } else {
+                    if self.write_buffer.is_some() {
+                        warn!("Disk write while write buffer not empty");
+                    }
+                    self.write_buffer = Some(value);
                 }
-                self.write_buffer = Some(value);
             }
             _ => (),
         }
