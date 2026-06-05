@@ -1,6 +1,9 @@
 # Feasibility: HD20 (DCD) emulation in Snow
 
-Status: investigation / design note (no implementation yet)
+Status: investigation / design note. Phase 1 (the protocol core) and the
+backing-store abstraction from Phase 0 are implemented and unit-tested in
+`core/src/mac/swim/dcd.rs`; the remaining phases (SWIM handshake integration,
+config/UI, broader machine coverage) are not yet started.
 
 ## Summary
 
@@ -364,7 +367,9 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   write — the OS ignores them — so they are not stored; the on-disk layout is a
   plain 512-byte-per-block image, byte-compatible with a SCSI/HFS image.
 * **Deliverable:** create/attach/persist a dynamically sized HD20 image (no
-  protocol yet).
+  protocol yet). *(Backing-store abstraction landed — `DcdDevice` holds a
+  `Box<dyn DiskImage>` and derives capacity from it; file create/attach UI is
+  Phase 3.)*
 
 ### Phase 1 — DCD protocol core (`core/src/mac/swim/dcd.rs`)
 
@@ -378,7 +383,9 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   **format (`0x19`)** and **verify (`0x1A`)**, following TashTwenty (which ships
   only read/write/identify and fakes the rest, and that suffices for disk init).
 * **Deliverable:** a unit-tested protocol engine driven by fed byte streams,
-  with no SWIM integration yet.
+  with no SWIM integration yet. *(Done — `core/src/mac/swim/dcd.rs`, 10 unit
+  tests covering the codec, framing, checksum and the read/write/identify
+  round-trips.)*
 
 ### Phase 2 — SWIM integration (the handshake)
 

@@ -3,6 +3,7 @@
 //! Floppy drive controller consisting of two different controllers:
 //! Integrated Wozniak Machine, Integrated Sander Machine.
 
+pub mod dcd;
 pub mod drive;
 pub mod ism;
 pub mod iwm;
