@@ -874,6 +874,10 @@ impl Emulator {
 
     #[cfg(feature = "savestates")]
     fn save_state(&self, p: &Path, screenshot: Option<Vec<u8>>) -> Result<()> {
+        if self.config.swim().dcd_capacity().is_some() {
+            bail!("Save states are not supported while an HD20 is attached");
+        }
+
         let mut f = File::create(p)?;
         let time = Instant::now();
 

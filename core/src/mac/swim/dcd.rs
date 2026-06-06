@@ -316,8 +316,7 @@ impl DcdDevice {
         // mountable, readable, writeable, icon_included, disk_in_place
         // (deliberately not ejectable: that flags removable media)
         p.push(0xE6); // characteristics
-        // This field is the highest addressable block, i.e. block count - 1.
-        p.extend_from_slice(&u24_be(self.block_count().saturating_sub(1) as u32));
+        p.extend_from_slice(&u24_be(self.block_count() as u32)); // number of blocks
         p.extend_from_slice(&[0, 0]); // spare blocks
         p.extend_from_slice(&[0, 0]); // bad blocks
         p.extend_from_slice(&[0u8; 52]); // manufacturer reserved
@@ -334,8 +333,7 @@ impl DcdDevice {
     }
 
     fn read_block(&self, sector: usize) -> Vec<u8> {
-        let off = sector * DCD_DATA_SIZE;
-        if off + DCD_DATA_SIZE <= self.image.byte_len() {
+        if let Some(off) = self.block_offset(sector) {
             self.image.read_bytes(off, DCD_DATA_SIZE)
         } else {
             vec![0u8; DCD_DATA_SIZE]
@@ -343,10 +341,15 @@ impl DcdDevice {
     }
 
     fn write_block(&mut self, sector: usize, data: &[u8]) {
-        let off = sector * DCD_DATA_SIZE;
-        if off + DCD_DATA_SIZE <= self.image.byte_len() {
+        if let Some(off) = self.block_offset(sector) {
             self.image.write_bytes(off, data);
         }
+    }
+
+    fn block_offset(&self, sector: usize) -> Option<usize> {
+        let off = sector.checked_mul(DCD_DATA_SIZE)?;
+        let end = off.checked_add(DCD_DATA_SIZE)?;
+        (end <= self.image.byte_len()).then_some(off)
     }
 }
 
@@ -417,10 +420,11 @@ enum Stage {
     HoldOffSending,
 }
 
-/// Drives the phase-line handshake around a [`DcdDevice`], bracketing each
-/// command/response transfer. The IWM wiring feeds it the phase-line state and
-/// the command/response bytes. Responses are paced into the IWM data register
-/// at the IWM byte rate rather than modelled at bit granularity.
+/// Drives the phase-line handshake around a [`DcdDevice`].
+///
+/// The IWM wiring feeds it the phase-line state and the command/response bytes.
+/// Responses are paced into the IWM data register at the IWM byte rate rather
+/// than modelled at bit granularity.
 pub struct DcdController {
     device: DcdDevice,
     /// Phase-line state (0-7) decoded from CA2/CA1/CA0
@@ -1192,6 +1196,30 @@ mod tests {
             u16::from_be_bytes([resp[27], resp[28]]) as usize,
             DCD_BLOCK_SIZE
         );
+    }
+
+    #[test]
+    fn controller_status_reports_block_count() {
+        let mut dev = device_with_blocks(40960); // 20 MB
+        let wire = dev
+            .process_request(&frame_request(
+                &finish_payload(vec![0x03, 0, 0, 0, 0, 0]),
+                49,
+            ))
+            .unwrap();
+        let resp = unframe_response(&wire);
+        assert_eq!(sector_addr(&resp[11..14]), dev.block_count());
+    }
+
+    #[test]
+    fn overflowing_block_offsets_are_out_of_range() {
+        let mut dev = device_with_blocks(2);
+        let before = dev.image.read_bytes(0, DCD_DATA_SIZE);
+
+        assert_eq!(dev.read_block(usize::MAX), vec![0; DCD_DATA_SIZE]);
+        dev.write_block(usize::MAX, &vec![0xA5; DCD_DATA_SIZE]);
+
+        assert_eq!(dev.image.read_bytes(0, DCD_DATA_SIZE), before);
     }
 
     #[test]

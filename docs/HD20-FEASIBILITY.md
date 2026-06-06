@@ -190,7 +190,7 @@ real-HD20-compatible values:
 - device: `0x0001`
 - manufacturer: `0x0001`
 - characteristics: `0xE6`
-- capacity: highest addressable block, or block count minus one
+- capacity: number of blocks, consistent with Read ID
 
 Snow does not copy every TashTwenty identity byte because those values identify
 TashTwenty rather than an Apple HD20.
@@ -253,7 +253,8 @@ requires it.
 
 ### Later enhancements
 
-- Include attached HD20 state in emulator save states.
+- Include attached HD20 state in emulator save states. Until then, Snow rejects
+  save-state creation while an HD20 is attached.
 - Report media-boundary errors accurately.
 - Add multiple daisy-chained devices if a concrete use case requires them.
 - Validate HOFF against real hardware or a known implementation trace.
@@ -363,8 +364,9 @@ at sectors 0 and 1.
 - HOFF is covered by unit tests but has not been observed in the current ROM
   boot traces.
 - Out-of-range media operations do not yet report accurate errors.
-- Web attachment, browser persistence, and save-state behavior are not
-  implemented.
+- Web attachment and browser persistence are not implemented.
+- Save-state creation is rejected while an HD20 is attached because the image
+  and controller state are not yet serialized.
 - HD20 software availability and HFS memory requirements limit usefulness on
   the earliest and smallest Macintosh configurations by design.
 

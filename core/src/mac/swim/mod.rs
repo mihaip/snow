@@ -268,9 +268,9 @@ impl Swim {
         self.dcd.as_ref().map(DcdController::stats)
     }
 
-    /// True when a DCD device is selected (external port with a device attached).
+    /// True when a DCD device is selected and enabled on the external port.
     fn dcd_selected(&self) -> bool {
-        self.extdrive && self.dcd.is_some()
+        self.enable && self.extdrive && self.dcd.is_some()
     }
 
     /// Cycles between DCD response bytes presented in the data register,
@@ -556,6 +556,13 @@ mod tests {
     fn dcd_inactive_on_internal_port() {
         let mut swim = swim_with_dcd();
         swim.write(reg(10), 0); // internal port
+        assert!(!swim.dcd_selected());
+    }
+
+    #[test]
+    fn dcd_inactive_when_external_port_is_disabled() {
+        let mut swim = swim_with_dcd();
+        swim.write(reg(8), 0); // disable
         assert!(!swim.dcd_selected());
     }
 

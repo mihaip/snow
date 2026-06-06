@@ -128,23 +128,17 @@ impl Swim {
         // Drive the DCD handshake when a device is attached to the external
         // port. The DCD sees the external port's !ENBL, so selecting the
         // internal port deasserts it even if the IWM ENABLE latch remains set.
-        if self.dcd.is_some() {
-            let was_sending = self.dcd.as_ref().unwrap().is_sending();
-            let (ca2, ca1, ca0, sel, enable) = (
-                self.ca2,
-                self.ca1,
-                self.ca0,
-                self.sel,
-                self.enable && self.extdrive,
-            );
-            self.dcd
-                .as_mut()
-                .unwrap()
-                .update_phase(ca2, ca1, ca0, sel, enable);
-            if !was_sending && self.dcd.as_ref().unwrap().is_sending() {
-                self.datareg = 0;
-                self.dcd_byte_timer = 0;
-            } else if was_sending && !self.dcd.as_ref().unwrap().is_sending() {
+        let (ca2, ca1, ca0, sel, enable) = (
+            self.ca2,
+            self.ca1,
+            self.ca0,
+            self.sel,
+            self.enable && self.extdrive,
+        );
+        if let Some(dcd) = self.dcd.as_mut() {
+            let was_sending = dcd.is_sending();
+            dcd.update_phase(ca2, ca1, ca0, sel, enable);
+            if was_sending != dcd.is_sending() {
                 self.datareg = 0;
                 self.dcd_byte_timer = 0;
             }
