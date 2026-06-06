@@ -152,9 +152,6 @@ pub struct Swim {
     /// Cycle accumulator that paces DCD response bytes into the data register
     #[serde(skip)]
     dcd_byte_timer: Ticks,
-    /// Initial delay before a DCD response starts clocking bytes
-    #[serde(skip)]
-    dcd_response_delay: Ticks,
 
     pub dbg_pc: u32,
     pub dbg_break: LatchingEvent,
@@ -216,7 +213,6 @@ impl Swim {
             enable: false,
             dcd: None,
             dcd_byte_timer: 0,
-            dcd_response_delay: 0,
             dbg_pc: 0,
             dbg_break: LatchingEvent::default(),
         }
@@ -256,7 +252,6 @@ impl Swim {
     pub fn detach_dcd(&mut self) {
         self.dcd = None;
         self.dcd_byte_timer = 0;
-        self.dcd_response_delay = 0;
     }
 
     pub fn dcd_image_path(&self) -> Option<&Path> {
@@ -279,11 +274,8 @@ impl Swim {
     }
 
     /// Cycles between DCD response bytes presented in the data register,
-    /// approximating the ~490 kHz IWM byte rate at the 8 MHz base clock.
+    /// modelling the 500 kHz serial bit rate at the 8 MHz base clock.
     const DCD_TICKS_PER_BYTE: Ticks = 128;
-    /// Delay after the ROM enters the response-read phase. The Plus/512Ke ROM
-    /// performs one clearing read before it starts comparing for the sync byte.
-    const DCD_INITIAL_RESPONSE_DELAY: Ticks = Self::DCD_TICKS_PER_BYTE * 8;
 
     fn get_selected_drive(&self) -> &FloppyDrive {
         &self.drives[self.get_selected_drive_idx()]
@@ -380,13 +372,7 @@ impl Tickable for Swim {
         }
 
         if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
-            let mut response_ticks = ticks;
-            if self.dcd_response_delay != 0 {
-                let delay_ticks = self.dcd_response_delay.min(response_ticks);
-                self.dcd_response_delay -= delay_ticks;
-                response_ticks -= delay_ticks;
-            }
-            self.dcd_byte_timer += response_ticks;
+            self.dcd_byte_timer += ticks;
             while self.dcd_byte_timer >= Self::DCD_TICKS_PER_BYTE {
                 if self.datareg != 0 {
                     break;

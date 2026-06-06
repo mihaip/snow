@@ -102,6 +102,13 @@ fn finish_payload(mut payload: Vec<u8>) -> Vec<u8> {
     payload
 }
 
+fn frame_response(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + payload.len() / 7 * 8);
+    out.push(SYNC);
+    out.extend(encode_payload(payload, Direction::DeviceToMac));
+    out
+}
+
 /// A single Directly Connected Disk device (an HD20). Capacity is derived from
 /// the backing image, which also provides file/mmap/writeback.
 pub struct DcdDevice {
@@ -166,7 +173,11 @@ impl DcdDevice {
         self.stats.last_request_prefix[..self.stats.last_request_len]
             .copy_from_slice(&request[..self.stats.last_request_len]);
         if !verify_checksum(&request) {
-            bail!("DCD request checksum mismatch");
+            // TashTwenty and the protocol notes specify a one-group 0x7F NAK,
+            // allowing the Macintosh to retry instead of timing out.
+            return Ok(vec![frame_response(&finish_payload(vec![
+                0x7F, 0, 0, 0, 0, 0,
+            ]))]);
         }
 
         let response = self.handle(&request)?;
@@ -186,16 +197,7 @@ impl DcdDevice {
 
         Ok(chunks
             .into_iter()
-            .map(|payload| {
-                let mut out = Vec::with_capacity(1 + payload.len() / 7 * 8);
-                out.push(SYNC);
-                out.extend(encode_payload(&payload, Direction::DeviceToMac));
-                // The IWM latches a byte when the MSb arrives in the shift
-                // register. Clock one extra byte so the final encoded group is
-                // visible to the ROM driver.
-                out.push(SYNC);
-                out
-            })
+            .map(|payload| frame_response(&payload))
             .collect())
     }
 
@@ -211,7 +213,9 @@ impl DcdDevice {
             // Format / verify-format: faked success
             0x19 => Ok(self.status_only(0x99)),
             0x1A => Ok(self.status_only(0x9A)),
-            other => bail!("unsupported DCD opcode {:#04x}", other),
+            // TashTwenty answers unknown commands with a placeholder response
+            // rather than leaving the Macintosh waiting for a response.
+            other => Ok(self.status_only(0x80 | (other & 0x3F))),
         }
     }
 
@@ -415,19 +419,15 @@ enum Stage {
 
 /// Drives the phase-line handshake around a [`DcdDevice`], bracketing each
 /// command/response transfer. The IWM wiring feeds it the phase-line state and
-/// the command/response bytes; the byte clocking is handled one byte per IWM
-/// data-register access rather than at bit granularity.
-///
-/// The handshake transitions follow the reverse-engineered protocol notes and
-/// are exercised by the unit tests below, but the exact polarity and driver
-/// loop behaviour still need confirming against a real ROM driver.
+/// the command/response bytes. Responses are paced into the IWM data register
+/// at the IWM byte rate rather than modelled at bit granularity.
 pub struct DcdController {
     device: DcdDevice,
     /// Phase-line state (0-7) decoded from CA2/CA1/CA0
     state: u8,
-    phase3: bool,
+    ca3: bool,
     enabled: bool,
-    phantom: bool,
+    selected: bool,
     stage: Stage,
     /// True while the device asserts !HSHK
     hshk: bool,
@@ -451,9 +451,9 @@ impl DcdController {
         Self {
             device,
             state: Self::STATE_IDLE,
-            phase3: false,
+            ca3: false,
             enabled: false,
-            phantom: false,
+            selected: false,
             stage: Stage::Idle,
             hshk: false,
             rx: Vec::new(),
@@ -470,25 +470,27 @@ impl DcdController {
     }
 
     /// Updates the phase-line state and advances the handshake on a change.
-    pub fn update_phase(&mut self, ca2: bool, ca1: bool, ca0: bool, phase3: bool, enable: bool) {
+    pub fn update_phase(&mut self, ca2: bool, ca1: bool, ca0: bool, ca3: bool, enable: bool) {
         let new = ((ca2 as u8) << 2) | ((ca1 as u8) << 1) | (ca0 as u8);
         if !enable {
-            self.phase3 = phase3;
+            self.ca3 = ca3;
             self.enabled = false;
-            self.phantom = false;
+            self.selected = false;
             self.go_idle();
             self.state = new;
             return;
         }
         if !self.enabled {
             self.enabled = true;
-            self.phase3 = phase3;
-            self.phantom = false;
+            self.ca3 = ca3;
+            self.selected = true;
         }
-        if phase3 != self.phase3 {
-            self.phase3 = phase3;
+        if ca3 != self.ca3 {
+            self.ca3 = ca3;
             if self.stage == Stage::Idle {
-                self.phantom = true;
+                // A CA3 pulse selects the next device in the daisy chain. This
+                // device remains unselected until !ENBL is cycled.
+                self.selected = false;
             }
         }
         if new == self.state {
@@ -506,11 +508,10 @@ impl DcdController {
 
         // RESET: power-on-equivalent reset.
         if new == 4 {
-            self.phantom = false;
             self.go_idle();
             return;
         }
-        if self.phantom {
+        if !self.selected {
             return;
         }
 
@@ -646,21 +647,7 @@ impl DcdController {
     /// RD-line level the Mac reads via the IWM status SENSE bit. !HSHK is active
     /// low, so an asserted handshake reads low.
     pub fn sense(&self) -> bool {
-        if self.phantom && matches!(self.state, 5..=7) {
-            return true;
-        }
-        let sense = match self.state {
-            2 | 3 => !self.hshk,
-            5 => false,    // detection: drive low
-            6 | 7 => true, // detection: drive high
-            _ => true,
-        };
-        sense
-    }
-
-    pub fn note_sense_read(&mut self) -> bool {
-        self.stats.sense_reads += 1;
-        if self.phantom && matches!(self.state, 5..=7) {
+        if !self.selected {
             return true;
         }
         match self.state {
@@ -669,6 +656,11 @@ impl DcdController {
             6 | 7 => true, // detection: drive high
             _ => true,
         }
+    }
+
+    pub fn note_sense_read(&mut self) -> bool {
+        self.stats.sense_reads += 1;
+        self.sense()
     }
 
     pub fn is_receiving(&self) -> bool {
@@ -700,11 +692,7 @@ impl DcdController {
             self.resume_sync = false;
             return Some(SYNC);
         }
-        // `tx` includes a final dummy byte modelled after real HD20-compatible
-        // hardware, where it only clocks the preceding byte into the IWM. At
-        // this byte-level boundary, exposing it as another data-register byte
-        // makes the ROM wait for a non-existent follow-up group.
-        let send_len = self.tx.len().saturating_sub(1);
+        let send_len = self.tx.len();
         if self.tx_pos >= send_len {
             self.hshk = false;
             return None;
@@ -892,14 +880,14 @@ mod tests {
     }
 
     #[test]
-    fn controller_phase3_selects_phantom_next_device() {
+    fn controller_ca3_unselects_current_device() {
         let mut c = controller(2);
         c.update_phase(false, true, false, false, true); // state 2
-        c.update_phase(false, true, false, true, true); // Phase 3 toggled
+        c.update_phase(false, true, false, true, true); // CA3 toggled
         c.update_phase(true, false, true, true, true); // state 5
         assert!(
             c.sense(),
-            "phantom device should not report DCD state 5 low"
+            "unselected device should not report DCD state 5 low"
         );
         c.update_phase(true, false, true, true, false); // enable deasserted
         c.update_phase(true, false, true, false, true); // first device again
@@ -939,12 +927,11 @@ mod tests {
     }
 
     #[test]
-    fn response_includes_dummy_clock_byte() {
+    fn response_contains_only_sync_and_declared_groups() {
         let mut d = device_with_blocks(8);
         let frame = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
         let resp = d.process_request(&frame).unwrap();
-        assert_eq!(resp.len(), 1 + 7 * 8 + 1);
-        assert_eq!(*resp.last().unwrap(), SYNC);
+        assert_eq!(resp.len(), 1 + 7 * 8);
     }
 
     #[test]
@@ -1219,18 +1206,22 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_opcode_errors() {
+    fn unsupported_opcode_returns_placeholder_response() {
         let mut dev = device_with_blocks(2);
         let req = frame_request(&finish_payload(vec![0x7E, 0, 0, 0, 0, 0]), 1);
-        assert!(dev.process_request(&req).is_err());
+        let resp = unframe_response(&dev.process_request(&req).unwrap());
+        assert_eq!(resp, vec![0xBE, 0, 0, 0, 0, 0, 0x42]);
+        assert!(verify_checksum(&resp));
     }
 
     #[test]
-    fn bad_checksum_rejected() {
+    fn bad_checksum_returns_nak() {
         let mut dev = device_with_blocks(2);
         let mut payload = finish_payload(vec![0x00, 1, 0, 0, 0, 0]);
         *payload.last_mut().unwrap() ^= 0xFF;
         let req = frame_request(&payload, 77);
-        assert!(dev.process_request(&req).is_err());
+        let resp = unframe_response(&dev.process_request(&req).unwrap());
+        assert_eq!(resp, vec![0x7F, 0, 0, 0, 0, 0, 0x81]);
+        assert!(verify_checksum(&resp));
     }
 }

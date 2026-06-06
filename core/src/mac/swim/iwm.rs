@@ -144,11 +144,9 @@ impl Swim {
             if !was_sending && self.dcd.as_ref().unwrap().is_sending() {
                 self.datareg = 0;
                 self.dcd_byte_timer = 0;
-                self.dcd_response_delay = Self::DCD_INITIAL_RESPONSE_DELAY;
             } else if was_sending && !self.dcd.as_ref().unwrap().is_sending() {
                 self.datareg = 0;
                 self.dcd_byte_timer = 0;
-                self.dcd_response_delay = 0;
             }
         }
     }
@@ -164,8 +162,6 @@ impl Swim {
                 // Data register
                 if !self.enable {
                     0xFF
-                } else if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
-                    std::mem::replace(&mut self.datareg, 0)
                 } else {
                     std::mem::replace(&mut self.datareg, 0)
                 }
