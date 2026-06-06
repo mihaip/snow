@@ -1,73 +1,108 @@
 # Feasibility: HD20 (DCD) emulation in Snow
 
-Status: investigation / design note. Phase 0 (backing-store abstraction),
-Phase 1 (protocol core) and Phase 2 (SWIM handshake state machine + IWM wiring)
-are implemented and unit-tested in `core/src/mac/swim/`. A minimal attach path
-(`EmulatorCommand::AttachHd20`) is also wired so the device can be driven by a
-booting ROM. The Phase 2 handshake has been **partially validated against the
-real Macintosh Plus ROM** (see "Hardware validation" below); the full boot
-sequence is not yet complete. The remaining phases (config/UI, broader machine
-coverage, daisy-chaining, persistence) are not yet started.
+Status: Phase 0 (backing-store abstraction), Phase 1 (protocol core), and the
+core Phase 2 milestone (SWIM handshake state machine + IWM wiring) are
+implemented and unit-tested in `core/src/mac/swim/`. A minimal attach path
+(`EmulatorCommand::AttachHd20`) and an ignored native ROM smoke test are also
+wired. The real Macintosh Plus ROM has been run as both a Plus and a 512Ke; in
+both cases it detects the virtual device, accepts Controller Status, and issues
+a block Read command. This meets the initial goal that Plus and 512Ke can see
+the virtual HD20. The remaining phases (config/UI, broader machine coverage,
+daisy-chaining, persistence, and full boot/mount testing) are not yet complete.
 
 ## Hardware validation (Macintosh Plus ROM)
 
-The DCD path was exercised by booting the real 128K Mac Plus ROM with an HD20
-image attached (via a throwaway harness driving `snow_core`'s `Emulator`). The
-following is confirmed working end-to-end against the ROM's own DCD driver:
+The DCD path was exercised by booting the real 128K Mac Plus ROM with an empty
+20 MB HD20 image attached via the ignored
+`emulator::tests::mac_plus_rom_reaches_hd20_read` harness. The ROM was run as
+both `MacModel::Plus` and `MacModel::Early512Ke`. The following is confirmed
+working end-to-end against the ROM's own DCD driver:
 
 * **Device detection** — the ROM's startup probe (phase states 5/6/7) reads the
   device's RD-line pattern via the status SENSE bit and recognises the device.
 * **Command decode** — the ROM issues a Controller Status (`0x03`) command; the
   device decodes it with a valid checksum (`03 00 00 00 00 00 FD`).
 * **Response delivery** — the device encodes the 343-byte status response and
-  the ROM reads it back and **accepts it**, continuing to a further command.
+  the ROM reads it back and accepts it with `lastStatus=0` / `lastResult=0`.
+* **Block read initiation** — after status, the ROM issues Read (`0x00`) for two
+  sectors starting at block zero. Reaching this command is the smoke test's
+  success condition.
 
-Four real bugs were found and fixed through this validation (all grounded in
-observed ROM behaviour or the TashTwenty firmware):
+The smoke test defaults to the parent Infinite Mac Plus ROM and an empty 20 MB
+in-memory device:
 
-1. The Mac appends NRZI flush bytes after the final group — the device must
-   ignore bytes past the declared group count, not require an exact length.
-2. Response bytes must be **paced** into the data register at the IWM byte rate
-   (one byte per `DCD_TICKS_PER_BYTE` cycles) rather than one per register
-   access, or the ROM's timed read loop mis-frames.
-3. The Mac dictates the response group count in the command header
-   (`resp_groups`); the device sends exactly that many groups and recomputes the
-   trailing checksum (the TashTwenty firmware copies `RC_RSPG` likewise).
-4. Identity/status fields were aligned to a real HD20 / TashTwenty: device type
-   `0x000210`, Read-ID bytes-per-block `0x0214` (532 = tags + data), and the
-   status "number of blocks" field is the highest addressable block (count − 1,
-   per TashTwenty's own comment).
+```bash
+SNOW_HD20_MODEL=Plus SNOW_HD20_STEPS=12000000 \
+  cargo test -p snow_core mac_plus_rom_reaches_hd20_read -- --ignored --nocapture
 
-**Where it stops, and why the gap is *timing*, not content.** With the above, the
-ROM runs: detect → Controller Status (`resp_groups=49`, full 343-byte response) →
-a second Controller Status (`resp_groups=1`, 7-byte response) → then drops into
-its idle device-poll loop (phase states 6/7/2) and shows the "?" disk — it gives
-up *without ever issuing a block read*, whether the image is blank or a real
-bootable System volume.
+SNOW_HD20_MODEL=Early512Ke SNOW_HD20_STEPS=12000000 \
+  cargo test -p snow_core mac_plus_rom_reaches_hd20_read -- --ignored --nocapture
+```
 
-The decisive observation: **TashTwenty — real hardware that boots Macs — returns
-a response to that second status command byte-for-byte identical to ours**
-(`[0x83,0x00,0x00,0x00,0x00,0x00,checksum]`), and its full-status content differs
-from both ours and the HD20 spec (it uses characteristics `0xF6`, manufacturer
-`0x0100`) yet the Mac boots from it. So the blocker is **not** the response
-content; it is a low-level signalling/timing difference between our byte-paced
-data path and the bit-level behaviour TashTwenty drives on the real IWM lines.
-Leading suspects, not yet addressed:
+Set `SNOW_HD20_IMAGE` to use a disk image and `SNOW_HD20_FLOPPY` to insert a
+boot floppy. A base HFS partition may need an Apple partition map added first:
 
-* **HOFF / hold-off (phase state 0)** is not implemented. The protocol lets the
-  Mac suspend a transfer (state 1 → 0) to service interrupts and resume it
-  (0 → 1) with a fresh `0xAA` sync + the next group. Long transfers (the 343-byte
-  status, and any block read) are prime candidates to be suspended; without
-  hold-off handling such a transfer desyncs.
-* The **byte-pacing rate** (`DCD_TICKS_PER_BYTE`, currently 128) and the exact
-  `!HSHK` assert/deassert timing are approximations that may not match the ROM's
-  read loop closely enough to progress past status.
+```bash
+../scripts/make-device-image.py input.dsk output-device.dsk
+```
 
-Closing this needs a bit-level reference: a logic-analyzer capture of a real
-HD20 / TashTwenty boot to diff against, or the Plus ROM's DCD driver
-disassembly. The authoritative write-ups (BMOW's reverse-engineering article and
-the bitsavers DCD spec PDFs) were unreachable from the build environment, whose
-network policy allowlists only GitHub.
+### Findings from ROM bring-up
+
+The most important bug was in the **7-to-8 codec's collected-LSB bit order**.
+Snow originally put the first payload byte's low bit in bit 6 of the collected
+LSB byte. The Plus ROM's receive routine reconstructs the first payload byte
+from bit 0, the second from bit 1, and so on. The old codec therefore decoded
+the expected status identifier `0x83` as `0x82`; the ROM reported
+`invalidResp` (`0x30`). Round-trip codec unit tests did not catch this because
+the encoder and decoder shared the same reversed convention. Keep a
+non-round-trip vector such as `[0x01, 0, ...] -> LSB byte 0x81`.
+
+Other bugs and useful observations:
+
+1. The Mac appends NRZI flush bytes after the final command group. Decode only
+   the declared group count and ignore trailing command bytes.
+2. Per BMOW, a real DCD sends one extra dummy byte after a response so the IWM
+   latches the final encoded byte. Keep that dummy in the wire model, but do
+   not expose it as another software-visible data-register byte.
+3. Response bytes must be paced into `datareg`; advancing one byte per polling
+   read lets the ROM consume the entire packet while waiting for sync.
+4. The Plus ROM receive routine performs one clearing `TST.b (A3)` before its
+   sync loop at ROM address `0x41983E`. Starting the response immediately lets
+   that clearing read consume `0xAA`. A short initial response delay is
+   therefore required before normal byte pacing starts.
+5. Do not overwrite an unread `datareg` byte. Pause response advancement until
+   the ROM consumes the current byte.
+6. The Mac dictates the response group count in the command header
+   (`resp_groups`); send exactly that many groups and recompute the checksum
+   when resizing a natural response.
+7. `SEL`, not `LSTRB`, is the floppy-port CA3/daisy-chain selection signal in
+   Snow. `SEL` comes from VIA port A; `LSTRB` is the floppy register latch
+   strobe.
+8. An attached DCD must be notified when the external port's effective
+   `!ENBL` deasserts. Passing `enable && extdrive` and updating the DCD even
+   while the internal port is selected prevents stale selection state.
+9. Controller Status is 343 payload bytes / 49 encoded groups. The implemented
+   status uses real-HD20-compatible device/manufacturer `0x0001`/`0x0001`,
+   characteristics `0xE6`, and highest addressable block (`count - 1`).
+10. HOFF handling and single-device CA3 phantom selection are implemented and
+    unit-tested, but the ROM smoke did not exercise HOFF. Future work should
+    validate interrupted long transfers against real hardware or a stronger
+    reference.
+
+The BMOW article's SonyVars offsets were especially useful for diagnosing ROM
+failures. `SonyVars` is pointed to by low-memory address `0x134`;
+`lastStatus` is at `SonyVars + 0x1BA`, and its high byte contains the detailed
+DCD error. Relevant errors observed during bring-up were:
+
+| Error | Meaning | What it indicated in Snow |
+|---|---|---|
+| `0x21` | timeout waiting for response sync | sync consumed by the clearing read or stream advanced too quickly |
+| `0x22` | timeout waiting for group | wrong visible response length / pacing |
+| `0x26` | response checksum error | final encoded group or dummy-clock handling |
+| `0x30` | invalid first response byte | collected-LSB bit order decoded `0x83` incorrectly |
+
+The ignored smoke harness prints these SonyVars fields on failure so future
+protocol changes can distinguish framing, checksum, and payload failures.
 
 ## Summary
 
@@ -393,7 +428,7 @@ Keep the DCD logic self-contained in `core/src/mac/swim/`:
 * **Frontend**: an "Attach HD20…" action in the egui/TUI media menus, parallel
   to the SCSI HDD attach UI in `frontend_egui/src/app.rs`.
 
-### Why timing accuracy is *not* a blocker
+### Why bit-level accuracy is not required
 
 Floppy emulation in Snow is bit/flux-accurate because the drive is free-running
 and the IWM must recover a self-clocking signal. DCD is the opposite: every
@@ -402,6 +437,13 @@ byte group is explicitly handshaked (`HOST` ↔ `!HSHK`), so the emulator can be
 part of low-level disk emulation and makes a correct implementation much more
 tractable — closer in spirit to the existing SCSI controller state machine than
 to the flux engine.
+
+However, the ROM does depend on modest **byte-level timing**. It polls the IWM
+data register waiting for MSB-set bytes, performs a clearing read before looking
+for response sync, and expects each unread byte to remain latched. Snow
+therefore paces bytes into `datareg`, delays the first response byte briefly,
+and does not overwrite an unread byte. Full NRZI/bit-level emulation is still
+unnecessary.
 
 ## Implementation plan
 
@@ -467,20 +509,20 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   everything after is breadth. *(Implemented — `DcdController` in
   `swim/dcd.rs` drives the phase-line handshake (HOST/HOFF/RESET, !HSHK,
   detection states) around the Phase 1 engine; `Swim`/`iwm.rs` route phase
-  changes, the SENSE bit and the data register to it when the external port has
-  a DCD device. Covered by controller-level and bus-level unit tests. Still
-  needs validation against a real ROM driver: the !HSHK polarity, the exact
-  receive/process/send transitions and the byte-per-data-register-access
-  clocking are best-effort readings of the reverse-engineered spec.)*
+  changes, the SENSE bit, and a paced data-register response stream to it when
+  the external port has a DCD device. Covered by controller-level, bus-level,
+  and ignored real-ROM smoke tests. Both Plus and 512Ke accept status and issue
+  a block read. Full read completion, write behavior under a booted OS, HOFF in
+  real software, and mounting/booting remain follow-up validation.)*
 
-  Assumptions baked into the wiring, to confirm against real software:
-  - Byte transfer is modelled one byte per IWM data-register access rather than
-    bit-by-bit at a fixed cell rate; this assumes the driver reads exactly the
-    expected byte count rather than spin-waiting on the sync byte.
-  - !HSHK is treated as active-low on the SENSE bit; detection drives RD low in
-    state 5 and high in states 6/7.
-  - The DCD device claims the external port whenever one is attached and
-    `extdrive` is selected (a daisy-chained external floppy is Phase 6).
+  Confirmed wiring details:
+  - !HSHK is active-low on the SENSE bit; detection drives RD low in state 5
+    and high in states 6/7.
+  - Responses are byte-paced into the IWM data register. The register retains
+    an unread byte, and the first response byte is delayed past the ROM's
+    clearing read.
+  - The DCD lives on the external port and sees effective enable as
+    `enable && extdrive`; `SEL` is CA3 for daisy-chain selection.
 
 ### Phase 3 — Configuration & UI
 

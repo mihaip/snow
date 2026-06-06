@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use anyhow::{Result, bail};
 use ism::{IsmError, IsmSetup, IsmStatus};
 
-use dcd::DcdController;
+use dcd::{DcdController, DcdStats};
 use drive::{DriveType, FloppyDrive};
 use iwm::{IwmMode, IwmStatus};
 use serde::{Deserialize, Serialize};
@@ -151,6 +151,9 @@ pub struct Swim {
     /// Cycle accumulator that paces DCD response bytes into the data register
     #[serde(skip)]
     dcd_byte_timer: Ticks,
+    /// Initial delay before a DCD response starts clocking bytes
+    #[serde(skip)]
+    dcd_response_delay: Ticks,
 
     pub dbg_pc: u32,
     pub dbg_break: LatchingEvent,
@@ -212,6 +215,7 @@ impl Swim {
             enable: false,
             dcd: None,
             dcd_byte_timer: 0,
+            dcd_response_delay: 0,
             dbg_pc: 0,
             dbg_break: LatchingEvent::default(),
         }
@@ -243,19 +247,26 @@ impl Swim {
         self.write_buffer.is_some()
     }
 
-    /// Cycles between DCD response bytes presented in the data register,
-    /// approximating the ~490 kHz IWM byte rate at the 8 MHz base clock.
-    const DCD_TICKS_PER_BYTE: Ticks = 128;
-
     /// Attaches a DCD (Hard Disk 20) device on the external port.
     pub fn attach_dcd(&mut self, image: Box<dyn crate::mac::scsi::disk_image::DiskImage>) {
         self.dcd = Some(DcdController::new(dcd::DcdDevice::new(image)));
+    }
+
+    pub fn dcd_stats(&self) -> Option<DcdStats> {
+        self.dcd.as_ref().map(DcdController::stats)
     }
 
     /// True when a DCD device is selected (external port with a device attached).
     fn dcd_selected(&self) -> bool {
         self.extdrive && self.dcd.is_some()
     }
+
+    /// Cycles between DCD response bytes presented in the data register,
+    /// approximating the ~490 kHz IWM byte rate at the 8 MHz base clock.
+    const DCD_TICKS_PER_BYTE: Ticks = 128;
+    /// Delay after the ROM enters the response-read phase. The Plus/512Ke ROM
+    /// performs one clearing read before it starts comparing for the sync byte.
+    const DCD_INITIAL_RESPONSE_DELAY: Ticks = Self::DCD_TICKS_PER_BYTE * 8;
 
     fn get_selected_drive(&self) -> &FloppyDrive {
         &self.drives[self.get_selected_drive_idx()]
@@ -351,21 +362,28 @@ impl Tickable for Swim {
             self.get_selected_drive_mut().ejecting = None;
         }
 
-        if self.get_selected_drive().is_running() {
-            // Advance read/write operation
-            match self.mode {
-                SwimMode::Iwm => self.iwm_tick(ticks)?,
-                SwimMode::Ism => self.ism_tick(ticks)?,
+        if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
+            let mut response_ticks = ticks;
+            if self.dcd_response_delay != 0 {
+                let delay_ticks = self.dcd_response_delay.min(response_ticks);
+                self.dcd_response_delay -= delay_ticks;
+                response_ticks -= delay_ticks;
             }
-        } else if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
-            // Clock the next DCD response byte into the data register at the IWM
-            // byte rate so the Mac's timed read loop sees it paced correctly.
-            self.dcd_byte_timer += ticks;
+            self.dcd_byte_timer += response_ticks;
             while self.dcd_byte_timer >= Self::DCD_TICKS_PER_BYTE {
+                if self.datareg != 0 {
+                    break;
+                }
                 self.dcd_byte_timer -= Self::DCD_TICKS_PER_BYTE;
                 if let Some(b) = self.dcd.as_mut().unwrap().next_send_byte() {
                     self.datareg = b;
                 }
+            }
+        } else if self.get_selected_drive().is_running() {
+            // Advance read/write operation
+            match self.mode {
+                SwimMode::Iwm => self.iwm_tick(ticks)?,
+                SwimMode::Ism => self.ism_tick(ticks)?,
             }
         }
 
