@@ -54,6 +54,9 @@ impl FileDiskImage {
             bail!("File not found: {}", filename.display());
         }
 
+        #[cfg(not(feature = "mmap"))]
+        let _ = writable;
+
         #[cfg(feature = "mmap")]
         let disk = Self::mmap_file(filename, writable)?;
 

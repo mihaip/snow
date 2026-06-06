@@ -116,6 +116,8 @@ DCD uses the external floppy-drive selection path:
 - A CA3 pulse unselects the current device until external `!ENBL` cycles, even
   though Snow currently attaches only one device. This prevents the first
   device from incorrectly answering probes for later chain positions.
+- While the HD20 is unselected, IWM accesses fall through to the external
+  floppy-drive path.
 - The device must be notified when effective external `!ENBL` deasserts,
   including when the internal floppy port becomes selected.
 

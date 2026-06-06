@@ -162,8 +162,9 @@ impl Swim {
             }
             (true, false) => {
                 // Read status register
-                let sense = if self.dcd_selected() {
-                    self.dcd.as_mut().unwrap().note_sense_read()
+                let dcd_selected = self.dcd_selected();
+                let sense = if let Some(dcd) = self.dcd.as_mut().filter(|_| dcd_selected) {
+                    dcd.note_sense_read()
                 } else {
                     self.get_selected_drive()
                         .read_sense(self.get_selected_drive_reg_u8())
@@ -221,8 +222,13 @@ impl Swim {
                 self.iwm_mode.set_mode(value);
             }
             (true, true, true) => {
-                if self.dcd_selected() && self.dcd.as_ref().unwrap().is_receiving() {
-                    self.dcd.as_mut().unwrap().write_data(value);
+                let dcd_selected = self.dcd_selected();
+                if let Some(dcd) = self
+                    .dcd
+                    .as_mut()
+                    .filter(|dcd| dcd_selected && dcd.is_receiving())
+                {
+                    dcd.write_data(value);
                 } else {
                     if self.write_buffer.is_some() {
                         warn!("Disk write while write buffer not empty");

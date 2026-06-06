@@ -204,7 +204,7 @@ impl DcdDevice {
     fn handle(&mut self, req: &[u8]) -> Result<Vec<u8>> {
         let opcode = *req.first().unwrap_or(&0xFF);
         self.stats.record(opcode);
-        info!("DCD opcode {:#04x}", opcode);
+        debug!("DCD opcode {:#04x}", opcode);
         match opcode {
             0x00 => self.handle_read(req),
             0x01 | 0x41 | 0x02 | 0x42 => self.handle_write(req, opcode),
@@ -675,6 +675,10 @@ impl DcdController {
         self.stage == Stage::Sending
     }
 
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
+
     /// Accepts one command byte clocked out by the Mac.
     pub fn write_data(&mut self, byte: u8) {
         if self.skip_resume_sync && byte == SYNC {
@@ -701,22 +705,20 @@ impl DcdController {
             self.hshk = false;
             return None;
         }
-        let b = self.tx.get(self.tx_pos).copied();
-        if b.is_some() {
-            self.tx_pos += 1;
-            if self.send_holdoff_pending && self.response_group_complete() {
-                self.send_holdoff_pending = false;
-                self.stage = Stage::HoldOffSending;
-            }
-            if self.tx_pos >= send_len {
-                self.hshk = false;
-                self.stats.responses_completed += 1;
-                if self.response_opcode == Some(0x00) {
-                    self.stats.read_responses_completed += 1;
-                }
+        let b = self.tx.get(self.tx_pos).copied()?;
+        self.tx_pos += 1;
+        if self.send_holdoff_pending && self.response_group_complete() {
+            self.send_holdoff_pending = false;
+            self.stage = Stage::HoldOffSending;
+        }
+        if self.tx_pos >= send_len {
+            self.hshk = false;
+            self.stats.responses_completed += 1;
+            if self.response_opcode == Some(0x00) {
+                self.stats.read_responses_completed += 1;
             }
         }
-        b
+        Some(b)
     }
 
     pub fn stats(&self) -> DcdStats {

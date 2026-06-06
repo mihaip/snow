@@ -270,7 +270,7 @@ impl Swim {
 
     /// True when a DCD device is selected and enabled on the external port.
     fn dcd_selected(&self) -> bool {
-        self.enable && self.extdrive && self.dcd.is_some()
+        self.enable && self.extdrive && self.dcd.as_ref().is_some_and(DcdController::is_selected)
     }
 
     /// Cycles between DCD response bytes presented in the data register,
@@ -371,14 +371,19 @@ impl Tickable for Swim {
             self.get_selected_drive_mut().ejecting = None;
         }
 
-        if self.dcd_selected() && self.dcd.as_ref().unwrap().is_sending() {
+        let dcd_selected = self.dcd_selected();
+        if let Some(dcd) = self
+            .dcd
+            .as_mut()
+            .filter(|dcd| dcd_selected && dcd.is_sending())
+        {
             self.dcd_byte_timer += ticks;
             while self.dcd_byte_timer >= Self::DCD_TICKS_PER_BYTE {
                 if self.datareg != 0 {
                     break;
                 }
                 self.dcd_byte_timer -= Self::DCD_TICKS_PER_BYTE;
-                if let Some(b) = self.dcd.as_mut().unwrap().next_send_byte() {
+                if let Some(b) = dcd.next_send_byte() {
                     self.datareg = b;
                 }
             }
@@ -564,6 +569,19 @@ mod tests {
         let mut swim = swim_with_dcd();
         swim.write(reg(8), 0); // disable
         assert!(!swim.dcd_selected());
+    }
+
+    #[test]
+    fn dcd_inactive_after_ca3_selects_next_device() {
+        let mut swim = swim_with_dcd();
+        let sense_reads = swim.dcd_stats().unwrap().sense_reads;
+
+        swim.sel = true;
+        swim.write(reg(0), 0); // propagate CA3 change
+        assert!(!swim.dcd_selected());
+
+        read_sense_bit(&mut swim);
+        assert_eq!(swim.dcd_stats().unwrap().sense_reads, sense_reads);
     }
 
     #[test]
