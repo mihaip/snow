@@ -20,9 +20,6 @@ The remaining product work is primarily web frontend attachment and
 persistence. Multiple daisy-chained devices and save-state support are future
 enhancements.
 
-The filename is retained for existing links, but this document now describes
-the accepted design rather than evaluating feasibility.
-
 ## Background
 
 Infinite Mac needs hard-disk-like storage for Macintosh models that predate
