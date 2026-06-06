@@ -50,7 +50,7 @@ use crate::mac::scsi::disk_image::DiskImage;
 use crate::mac::swim::Swim;
 use comm::{
     Breakpoint, EmulatorCommand, EmulatorCommandSender, EmulatorEvent, EmulatorEventReceiver,
-    EmulatorStatus, FddStatus, InputRecording, ScsiTargetStatus,
+    EmulatorStatus, FddStatus, Hd20Status, InputRecording, ScsiTargetStatus,
 };
 
 /// Mouse emulation mode
@@ -620,6 +620,14 @@ impl Emulator {
                                 .and_then(|d| d.eth_capture_status()),
                         })
                 }),
+                hd20: self
+                    .config
+                    .swim()
+                    .dcd_capacity()
+                    .map(|capacity| Hd20Status {
+                        image: self.config.swim().dcd_image_path().map(Path::to_path_buf),
+                        capacity,
+                    }),
                 speed: self.config.speed(),
                 effective_speed: self.config.effective_speed(),
             })))?;
@@ -991,15 +999,27 @@ impl Tickable for Emulator {
                     }
                     EmulatorCommand::AttachHd20(filename) => {
                         use crate::mac::scsi::disk_image::FileDiskImage;
-                        match FileDiskImage::open_block_sized(&filename, true, 512) {
-                            Ok(img) => {
-                                self.config.swim_mut().attach_dcd(Box::new(img));
-                                info!("HD20 attached, image '{}' loaded", filename.display());
-                            }
-                            Err(e) => {
-                                self.user_error(&format!("Cannot attach HD20: {:#}", e));
+                        if self.model.dcd_max_devices() == 0 {
+                            self.user_error(&format!(
+                                "{} does not support the Hard Disk 20",
+                                self.model
+                            ));
+                        } else {
+                            match FileDiskImage::open_block_sized(&filename, true, 512) {
+                                Ok(img) => {
+                                    self.config.swim_mut().attach_dcd(Box::new(img));
+                                    info!("HD20 attached, image '{}' loaded", filename.display());
+                                }
+                                Err(e) => {
+                                    self.user_error(&format!("Cannot attach HD20: {:#}", e));
+                                }
                             }
                         }
+                        self.status_update()?;
+                    }
+                    EmulatorCommand::DetachHd20 => {
+                        self.config.swim_mut().detach_dcd();
+                        info!("HD20 detached");
                         self.status_update()?;
                     }
                     EmulatorCommand::ScsiBranchHdd(id, filename) => {
@@ -1610,6 +1630,17 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30_000_000);
+        let min_read_responses = std::env::var("SNOW_HD20_MIN_READ_RESPONSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let min_writes = std::env::var("SNOW_HD20_MIN_WRITES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let require_floppy_eject = std::env::var("SNOW_HD20_REQUIRE_FLOPPY_EJECT")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
         let mut last_stats = None;
         let mut last_command_count = 0;
         for _ in 0..max_steps {
@@ -1621,13 +1652,16 @@ mod tests {
                 last_command_count = stats.commands;
             }
             last_stats = Some(stats);
-            if stats.read_commands > 0 {
+            if stats.read_responses_completed >= min_read_responses
+                && stats.write_commands >= min_writes
+                && (!require_floppy_eject || !emulator.config.swim().drives[0].floppy_inserted)
+            {
                 return Ok(());
             }
         }
 
         bail!(
-            "Mac ROM did not issue an HD20 read; final DCD stats: {:?}; {}",
+            "Mac ROM did not reach the requested HD20 read/write thresholds; final DCD stats: {:?}; {}",
             last_stats,
             hd20_driver_diag(&emulator)
         );

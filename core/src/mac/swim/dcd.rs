@@ -2,10 +2,10 @@
 //!
 //! Protocol details from the reverse-engineered notes at
 //! <https://github.com/lampmerchant/tashnotes> (macintosh/floppy/dcd).
-#![allow(dead_code)] // Not yet wired into the bus.
-
 use anyhow::{Result, bail};
 use log::*;
+use std::collections::VecDeque;
+use std::path::Path;
 
 use crate::mac::scsi::disk_image::DiskImage;
 
@@ -125,9 +125,22 @@ impl DcdDevice {
         self.image.byte_len() / DCD_DATA_SIZE
     }
 
+    pub fn image_path(&self) -> Option<&Path> {
+        self.image.image_path()
+    }
+
     /// Processes a complete Mac->device transfer (sync + length header + groups)
     /// and returns the device->Mac reply (sync + groups).
     pub fn process_request(&mut self, wire: &[u8]) -> Result<Vec<u8>> {
+        self.process_request_sequence(wire)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("DCD command produced no response"))
+    }
+
+    /// Processes a request and returns each separately handshaked response
+    /// transfer. Multi-sector reads produce one response per sector.
+    pub fn process_request_sequence(&mut self, wire: &[u8]) -> Result<Vec<Vec<u8>>> {
         if wire.first() != Some(&SYNC) {
             bail!("DCD request missing sync byte");
         }
@@ -156,27 +169,34 @@ impl DcdDevice {
             bail!("DCD request checksum mismatch");
         }
 
-        let mut response = self.handle(&request)?;
-        // The device sends exactly as many groups as the Mac asked for in the
-        // command header (the real firmware copies this from the request); if
-        // that differs from the natural response length, resize and recompute
-        // the trailing checksum so the shortened payload stays valid.
+        let response = self.handle(&request)?;
+        // Each response transfer contains exactly as many groups as the Mac
+        // requested. Multi-sector reads repeat that transfer once per sector.
         let target = resp_groups * 7;
-        if target != 0 && target != response.len() {
-            response.resize(target, 0);
-            let last = target - 1;
-            response[last] = 0;
-            response[last] = checksum_for(&response);
-        }
+        let chunks = if target == 0 {
+            vec![response]
+        } else if request.first() == Some(&0x00) && response.len() > target {
+            response
+                .chunks(target)
+                .map(|chunk| resize_response(chunk.to_vec(), target))
+                .collect()
+        } else {
+            vec![resize_response(response, target)]
+        };
 
-        let mut out = Vec::with_capacity(1 + response.len() / 7 * 8);
-        out.push(SYNC);
-        out.extend(encode_payload(&response, Direction::DeviceToMac));
-        // The IWM latches a byte when the MSb arrives in the shift register.
-        // Real HD20-compatible devices clock one extra byte after the encoded
-        // response so the final encoded group is visible to the ROM driver.
-        out.push(SYNC);
-        Ok(out)
+        Ok(chunks
+            .into_iter()
+            .map(|payload| {
+                let mut out = Vec::with_capacity(1 + payload.len() / 7 * 8);
+                out.push(SYNC);
+                out.extend(encode_payload(&payload, Direction::DeviceToMac));
+                // The IWM latches a byte when the MSb arrives in the shift
+                // register. Clock one extra byte so the final encoded group is
+                // visible to the ROM driver.
+                out.push(SYNC);
+                out
+            })
+            .collect())
     }
 
     fn handle(&mut self, req: &[u8]) -> Result<Vec<u8>> {
@@ -212,7 +232,7 @@ impl DcdDevice {
             let data = self.read_block(base + i);
             let mut p = Vec::with_capacity(DCD_BLOCK_SIZE + 7);
             p.push(0x80); // identifier
-            p.push((count - 1 - i) as u8); // sectors remaining
+            p.push((count - i) as u8); // sectors remaining, including this one
             p.extend_from_slice(&[0, 0, 0, 0]); // status
             p.extend_from_slice(&[0u8; DCD_TAG_SIZE]); // tags
             p.extend_from_slice(&data); // data
@@ -344,6 +364,8 @@ pub struct DcdStats {
     pub last_tx_bytes: usize,
     pub receive_holdoffs: usize,
     pub send_holdoffs: usize,
+    pub responses_completed: usize,
+    pub read_responses_completed: usize,
     pub last_request_len: usize,
     pub last_request_prefix: [u8; 32],
 }
@@ -360,6 +382,16 @@ impl DcdStats {
             _ => {}
         }
     }
+}
+
+fn resize_response(mut response: Vec<u8>, target: usize) -> Vec<u8> {
+    if response.len() != target {
+        response.resize(target, 0);
+        let last = target - 1;
+        response[last] = 0;
+        response[last] = checksum_for(&response);
+    }
+    response
 }
 
 /// Stage of a DCD handshake transfer.
@@ -401,9 +433,13 @@ pub struct DcdController {
     hshk: bool,
     rx: Vec<u8>,
     tx: Vec<u8>,
+    pending_tx: VecDeque<Vec<u8>>,
     tx_pos: usize,
     resume_sync: bool,
     skip_resume_sync: bool,
+    receive_holdoff_pending: bool,
+    send_holdoff_pending: bool,
+    response_opcode: Option<u8>,
     stats: DcdStats,
 }
 
@@ -422,9 +458,13 @@ impl DcdController {
             hshk: false,
             rx: Vec::new(),
             tx: Vec::new(),
+            pending_tx: VecDeque::new(),
             tx_pos: 0,
             resume_sync: false,
             skip_resume_sync: false,
+            receive_holdoff_pending: false,
+            send_holdoff_pending: false,
+            response_opcode: None,
             stats: DcdStats::default(),
         }
     }
@@ -485,15 +525,12 @@ impl DcdController {
             (Stage::ReadyToReceive, 1) => self.stage = Stage::Receiving,
             // Mac signals end of command (1->3): process and queue the response.
             (Stage::Receiving, 3) => self.process(),
-            // Mac can hold off in the middle of a command group. The partial
-            // group is ignored; on resume the Mac repeats a sync byte and then
-            // retransmits that group.
+            // HOFF takes effect after the current encoded group finishes.
             (Stage::Receiving, 0) => self.hold_off_receiving(),
-            (Stage::HoldOffReceiving, 3) => {
-                self.hshk = true;
+            (Stage::HoldOffReceiving, 1) => {
                 self.skip_resume_sync = true;
+                self.stage = Stage::Receiving;
             }
-            (Stage::HoldOffReceiving, 1) => self.stage = Stage::Receiving,
             (Stage::HoldOffReceiving, 2) => self.go_idle(),
             // Mac is back in idle awaiting the response: assert !HSHK if ready.
             (Stage::ResponseReady, 2) => self.hshk = !self.tx.is_empty(),
@@ -502,12 +539,13 @@ impl DcdController {
                 self.stage = Stage::Sending;
             }
             (Stage::Sending, 0) => self.hold_off_sending(),
-            (Stage::HoldOffSending, 3) => {
-                self.hshk = true;
-                self.stage = Stage::ResponseReady;
+            (Stage::HoldOffSending, 1) => {
+                self.resume_sync = true;
+                self.stage = Stage::Sending;
             }
             // Response fully read.
-            (Stage::Sending, 2) | (Stage::Sending, 3) => self.go_idle(),
+            (Stage::Sending, 3) => self.finish_response_transfer(),
+            (Stage::Sending, 2) => self.go_idle(),
             // Any other return to idle resets the handshake (e.g. the Mac's
             // startup detection walk passing through transfer states).
             (_, 2) => self.go_idle(),
@@ -517,14 +555,15 @@ impl DcdController {
 
     fn process(&mut self) {
         if self.rx.first() == Some(&SYNC) && self.rx.len() >= 3 {
-            let result = self.device.process_request(&self.rx);
-            self.tx = match result {
-                Ok(tx) => tx,
+            let result = self.device.process_request_sequence(&self.rx);
+            self.pending_tx = match result {
+                Ok(tx) => tx.into(),
                 Err(e) => {
                     warn!("DCD command processing failed: {:#}", e);
-                    Vec::new()
+                    VecDeque::new()
                 }
             };
+            self.tx = self.pending_tx.pop_front().unwrap_or_default();
             self.stats.last_tx_bytes = self.tx.len();
             debug!(
                 "DCD command: {} command bytes -> {} response bytes",
@@ -533,10 +572,14 @@ impl DcdController {
             );
         } else {
             self.tx.clear();
+            self.pending_tx.clear();
         }
         self.tx_pos = 0;
+        self.response_opcode = self.device.stats().last_opcode;
         self.resume_sync = false;
         self.skip_resume_sync = false;
+        self.receive_holdoff_pending = false;
+        self.send_holdoff_pending = false;
         self.hshk = false;
         self.stage = if self.tx.is_empty() {
             Stage::Idle
@@ -548,36 +591,56 @@ impl DcdController {
     fn go_idle(&mut self) {
         self.rx.clear();
         self.tx.clear();
+        self.pending_tx.clear();
         self.tx_pos = 0;
         self.resume_sync = false;
         self.skip_resume_sync = false;
+        self.receive_holdoff_pending = false;
+        self.send_holdoff_pending = false;
+        self.response_opcode = None;
         self.hshk = false;
         self.stage = Stage::Idle;
     }
 
+    fn finish_response_transfer(&mut self) {
+        if let Some(tx) = self.pending_tx.pop_front() {
+            self.tx = tx;
+            self.tx_pos = 0;
+            self.resume_sync = false;
+            self.send_holdoff_pending = false;
+            self.hshk = false;
+            self.stage = Stage::ResponseReady;
+        } else {
+            self.go_idle();
+        }
+    }
+
     fn hold_off_receiving(&mut self) {
         self.stats.receive_holdoffs += 1;
-        if self.rx.len() > 3 {
-            let group_start = 3 + ((self.rx.len() - 3) / 8) * 8;
-            self.rx.truncate(group_start);
+        if self.command_group_complete() {
+            self.stage = Stage::HoldOffReceiving;
         } else {
-            self.rx.clear();
+            self.receive_holdoff_pending = true;
         }
         self.hshk = false;
-        self.skip_resume_sync = false;
-        self.stage = Stage::HoldOffReceiving;
     }
 
     fn hold_off_sending(&mut self) {
         self.stats.send_holdoffs += 1;
-        if self.tx_pos > 1 {
-            self.tx_pos = 1 + ((self.tx_pos - 1) / 8) * 8;
+        if self.response_group_complete() {
+            self.stage = Stage::HoldOffSending;
         } else {
-            self.tx_pos = 0;
+            self.send_holdoff_pending = true;
         }
-        self.resume_sync = self.tx_pos > 0;
         self.hshk = false;
-        self.stage = Stage::HoldOffSending;
+    }
+
+    fn command_group_complete(&self) -> bool {
+        self.rx.len() >= 3 && (self.rx.len() - 3).is_multiple_of(8)
+    }
+
+    fn response_group_complete(&self) -> bool {
+        self.tx_pos >= 1 && (self.tx_pos - 1).is_multiple_of(8)
     }
 
     /// RD-line level the Mac reads via the IWM status SENSE bit. !HSHK is active
@@ -624,6 +687,10 @@ impl DcdController {
         }
         self.skip_resume_sync = false;
         self.rx.push(byte);
+        if self.receive_holdoff_pending && self.command_group_complete() {
+            self.receive_holdoff_pending = false;
+            self.stage = Stage::HoldOffReceiving;
+        }
     }
 
     /// Returns the next response byte to clock onto the read line, or `None`
@@ -645,8 +712,16 @@ impl DcdController {
         let b = self.tx.get(self.tx_pos).copied();
         if b.is_some() {
             self.tx_pos += 1;
+            if self.send_holdoff_pending && self.response_group_complete() {
+                self.send_holdoff_pending = false;
+                self.stage = Stage::HoldOffSending;
+            }
             if self.tx_pos >= send_len {
                 self.hshk = false;
+                self.stats.responses_completed += 1;
+                if self.response_opcode == Some(0x00) {
+                    self.stats.read_responses_completed += 1;
+                }
             }
         }
         b
@@ -662,7 +737,17 @@ impl DcdController {
         stats.last_tx_bytes = self.stats.last_tx_bytes;
         stats.receive_holdoffs = self.stats.receive_holdoffs;
         stats.send_holdoffs = self.stats.send_holdoffs;
+        stats.responses_completed = self.stats.responses_completed;
+        stats.read_responses_completed = self.stats.read_responses_completed;
         stats
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.device.block_count()
+    }
+
+    pub fn image_path(&self) -> Option<&Path> {
+        self.device.image_path()
     }
 }
 
@@ -863,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_replays_response_group_after_holdoff() {
+    fn controller_finishes_response_group_before_holdoff() {
         let mut c = controller(8);
         let frame = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
         c.update_phase(false, true, true, false, true); // state 3: assert HOST
@@ -877,22 +962,46 @@ mod tests {
         c.update_phase(false, false, true, false, true); // state 1: read response
 
         let first = c.next_send_byte().unwrap();
-        let second = c.next_send_byte().unwrap();
-        let third = c.next_send_byte().unwrap();
+        let _second = c.next_send_byte().unwrap();
+        let _third = c.next_send_byte().unwrap();
         c.update_phase(false, false, false, false, true); // state 0: HOFF
         assert!(c.sense(), "device should deassert !HSHK during holdoff");
-        c.update_phase(false, false, true, false, true); // state 1: resume walk
-        c.update_phase(false, true, true, false, true); // state 3: handshake
-        assert!(
-            !c.sense(),
-            "device should assert !HSHK when ready to resume"
-        );
-        c.update_phase(false, false, true, false, true); // state 1: read response again
+        let mut rest_of_group = Vec::new();
+        while c.is_sending() {
+            rest_of_group.push(c.next_send_byte().unwrap());
+        }
+        assert_eq!(rest_of_group.len(), 6);
+
+        c.update_phase(false, false, true, false, true); // state 1: resume
 
         assert_eq!(first, SYNC);
         assert_eq!(c.next_send_byte().unwrap(), SYNC);
-        assert_eq!(c.next_send_byte().unwrap(), second);
-        assert_eq!(c.next_send_byte().unwrap(), third);
+        assert_eq!(c.next_send_byte().unwrap(), c.tx[9]);
+    }
+
+    #[test]
+    fn controller_finishes_command_group_before_holdoff() {
+        let mut c = controller(8);
+        let frame = frame_request(&finish_payload(vec![0x04, 0, 0, 0, 0, 0]), 7);
+        c.update_phase(false, true, true, false, true); // state 3: assert HOST
+        c.update_phase(false, false, true, false, true); // state 1: data transfer
+        for &b in &frame[..5] {
+            c.write_data(b);
+        }
+        c.update_phase(false, false, false, false, true); // state 0: HOFF
+        assert!(c.is_receiving());
+        for &b in &frame[5..11] {
+            c.write_data(b);
+        }
+        assert!(!c.is_receiving());
+
+        c.update_phase(false, false, true, false, true); // state 1: resume
+        c.write_data(SYNC);
+        for &b in &frame[11..] {
+            c.write_data(b);
+        }
+        c.update_phase(false, true, true, false, true); // state 3: end of command
+        assert_eq!(c.device.stats().read_id_commands, 1);
     }
 
     #[test]
@@ -966,7 +1075,7 @@ mod tests {
         assert_eq!(resp.len(), DCD_BLOCK_SIZE + 7);
         assert!(verify_checksum(&resp));
         assert_eq!(resp[0], 0x80);
-        assert_eq!(resp[1], 0);
+        assert_eq!(resp[1], 1);
         let data = &resp[6 + DCD_TAG_SIZE..6 + DCD_TAG_SIZE + DCD_DATA_SIZE];
         assert_eq!(data, &pattern[..]);
     }
@@ -979,9 +1088,21 @@ mod tests {
 
         assert_eq!(resp.len(), 3 * (DCD_BLOCK_SIZE + 7));
         let stride = DCD_BLOCK_SIZE + 7;
-        assert_eq!(resp[1], 2);
-        assert_eq!(resp[stride + 1], 1);
-        assert_eq!(resp[2 * stride + 1], 0);
+        assert_eq!(resp[1], 3);
+        assert_eq!(resp[stride + 1], 2);
+        assert_eq!(resp[2 * stride + 1], 1);
+    }
+
+    #[test]
+    fn multi_sector_read_is_split_into_separate_response_transfers() {
+        let mut dev = device_with_blocks(8);
+        let req = frame_request(&finish_payload(vec![0x00, 3, 0, 0, 1, 0]), 77);
+        let responses = dev.process_request_sequence(&req).unwrap();
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(unframe_response(&responses[0])[1], 3);
+        assert_eq!(unframe_response(&responses[1])[1], 2);
+        assert_eq!(unframe_response(&responses[2])[1], 1);
     }
 
     #[test]
@@ -1010,6 +1131,34 @@ mod tests {
         );
         let data = &rresp[6 + DCD_TAG_SIZE..6 + DCD_TAG_SIZE + DCD_DATA_SIZE];
         assert_eq!(data, &pattern[..]);
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn file_backed_write_persists() {
+        use crate::mac::scsi::disk_image::FileDiskImage;
+        use std::fs;
+
+        let path = std::env::temp_dir().join(format!("snow-hd20-{}.img", std::process::id()));
+        fs::write(&path, vec![0u8; 4 * DCD_DATA_SIZE]).unwrap();
+
+        {
+            let image = FileDiskImage::open_block_sized(&path, true, DCD_DATA_SIZE).unwrap();
+            let mut dev = DcdDevice::new(Box::new(image));
+            let pattern = vec![0xA5; DCD_DATA_SIZE];
+            let mut body = vec![0x01, 1, 0, 0, 2, 0];
+            body.extend_from_slice(&[0u8; DCD_TAG_SIZE]);
+            body.extend_from_slice(&pattern);
+            dev.process_request(&frame_request(&finish_payload(body), 1))
+                .unwrap();
+        }
+
+        let disk = fs::read(&path).unwrap();
+        assert_eq!(
+            &disk[2 * DCD_DATA_SIZE..3 * DCD_DATA_SIZE],
+            &[0xA5; DCD_DATA_SIZE]
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

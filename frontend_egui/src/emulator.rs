@@ -17,8 +17,8 @@ use snow_core::cpu_m68k::disassembler::{Disassembler, DisassemblyEntry};
 use snow_core::cpu_m68k::regs::{Register, RegisterFile};
 use snow_core::debuggable::DebuggableProperties;
 use snow_core::emulator::comm::{
-    Breakpoint, EmulatorCommand, EmulatorEvent, EmulatorSpeed, FddStatus, ScsiTargetStatus,
-    UserMessageType,
+    Breakpoint, EmulatorCommand, EmulatorEvent, EmulatorSpeed, FddStatus, Hd20Status,
+    ScsiTargetStatus, UserMessageType,
 };
 use snow_core::emulator::comm::{EmulatorCommandSender, EmulatorEventReceiver, EmulatorStatus};
 use snow_core::emulator::{Emulator, MouseMode};
@@ -687,6 +687,14 @@ impl EmulatorState {
         Some(&status.scsi)
     }
 
+    pub fn get_hd20_status(&self) -> Option<Option<&Hd20Status>> {
+        let status = self.status.as_ref()?;
+        if status.model.dcd_max_devices() == 0 {
+            return None;
+        }
+        Some(status.hd20.as_ref())
+    }
+
     /// Gets a copy of SCSI targets and loaded media
     pub fn get_scsi_targets(&self) -> Option<ScsiTargets> {
         let status = self.get_scsi_target_status()?;
@@ -811,6 +819,26 @@ impl EmulatorState {
         sender
             .send(EmulatorCommand::ScsiAttachHdd(id, path.to_path_buf()))
             .unwrap();
+    }
+
+    pub fn hd20_attach(&self, path: &Path) {
+        let Some(ref sender) = self.cmdsender else {
+            return;
+        };
+        sender
+            .send(EmulatorCommand::AttachHd20(path.to_path_buf()))
+            .unwrap();
+    }
+
+    pub fn hd20_detach(&mut self) {
+        let Some(ref sender) = self.cmdsender else {
+            return;
+        };
+        sender.send(EmulatorCommand::DetachHd20).unwrap();
+        self.messages.push_back((
+            UserMessageType::Notice,
+            "HD20 detached. System should be restarted.".to_owned(),
+        ));
     }
 
     /// Loads a SCSI HDD image from the specified path into the first free SCSI slot

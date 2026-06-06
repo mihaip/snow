@@ -9,6 +9,7 @@ pub mod ism;
 pub mod iwm;
 
 use std::collections::VecDeque;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use ism::{IsmError, IsmSetup, IsmStatus};
@@ -250,6 +251,22 @@ impl Swim {
     /// Attaches a DCD (Hard Disk 20) device on the external port.
     pub fn attach_dcd(&mut self, image: Box<dyn crate::mac::scsi::disk_image::DiskImage>) {
         self.dcd = Some(DcdController::new(dcd::DcdDevice::new(image)));
+    }
+
+    pub fn detach_dcd(&mut self) {
+        self.dcd = None;
+        self.dcd_byte_timer = 0;
+        self.dcd_response_delay = 0;
+    }
+
+    pub fn dcd_image_path(&self) -> Option<&Path> {
+        self.dcd.as_ref().and_then(DcdController::image_path)
+    }
+
+    pub fn dcd_capacity(&self) -> Option<usize> {
+        self.dcd
+            .as_ref()
+            .map(|dcd| dcd.block_count() * dcd::DCD_DATA_SIZE)
     }
 
     pub fn dcd_stats(&self) -> Option<DcdStats> {
@@ -554,5 +571,15 @@ mod tests {
         let mut swim = swim_with_dcd();
         swim.write(reg(10), 0); // internal port
         assert!(!swim.dcd_selected());
+    }
+
+    #[test]
+    fn dcd_attach_status_and_detach() {
+        let mut swim = swim_with_dcd();
+        assert_eq!(swim.dcd_capacity(), Some(512 * 64));
+        assert!(swim.dcd_image_path().is_none());
+        swim.detach_dcd();
+        assert_eq!(swim.dcd_capacity(), None);
+        assert!(swim.dcd_stats().is_none());
     }
 }

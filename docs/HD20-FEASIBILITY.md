@@ -1,19 +1,17 @@
 # Feasibility: HD20 (DCD) emulation in Snow
 
-Status: Phase 0 (backing-store abstraction), Phase 1 (protocol core), and the
-core Phase 2 milestone (SWIM handshake state machine + IWM wiring) are
-implemented and unit-tested in `core/src/mac/swim/`. A minimal attach path
-(`EmulatorCommand::AttachHd20`) and an ignored native ROM smoke test are also
-wired. The real Macintosh Plus ROM has been run as both a Plus and a 512Ke; in
-both cases it detects the virtual device, accepts Controller Status, and issues
-a block Read command. This meets the initial goal that Plus and 512Ke can see
-the virtual HD20. The remaining phases (config/UI, broader machine coverage,
-daisy-chaining, persistence, and full boot/mount testing) are not yet complete.
+Status: Phases 0 through 4 are implemented and validated on the native build.
+The Plus/512Ke ROM path completes multi-sector reads and writes against a
+bootable HFS volume. The stock 64K-ROM Macintosh 512K path also works through a
+400K HD 20 Startup floppy, including the startup floppy's automatic eject.
+The native egui frontend can create, attach, show, and detach a single HD20
+image on supported models. Phase 5 (later models), Phase 6 (multiple
+daisy-chained devices), and web-frontend attachment remain future work.
 
 ## Hardware validation (Macintosh Plus ROM)
 
-The DCD path was exercised by booting the real 128K Mac Plus ROM with an empty
-20 MB HD20 image attached via the ignored
+The DCD path was exercised by booting the real 128K Mac Plus ROM with both an
+empty 20 MB HD20 and a bootable flat HFS image attached via the ignored
 `emulator::tests::mac_plus_rom_reaches_hd20_read` harness. The ROM was run as
 both `MacModel::Plus` and `MacModel::Early512Ke`. The following is confirmed
 working end-to-end against the ROM's own DCD driver:
@@ -24,9 +22,13 @@ working end-to-end against the ROM's own DCD driver:
   device decodes it with a valid checksum (`03 00 00 00 00 00 FD`).
 * **Response delivery** — the device encodes the 343-byte status response and
   the ROM reads it back and accepts it with `lastStatus=0` / `lastResult=0`.
-* **Block read initiation** — after status, the ROM issues Read (`0x00`) for two
-  sectors starting at block zero. Reaching this command is the smoke test's
-  success condition.
+* **Multi-sector reads** — after status, the ROM issues Read (`0x00`) for two
+  sectors starting at block zero and consumes both separately handshaked
+  response transfers. The default smoke-test threshold is two completed read
+  responses, not merely seeing the command.
+* **Boot-volume I/O** — with Infinite Mac's flat `System 5.1 HD.dsk`, the Plus
+  completes more than 100 sector responses and issues a real Write (`0x01`)
+  with `lastStatus=0` / `lastResult=0`.
 
 The smoke test defaults to the parent Infinite Mac Plus ROM and an empty 20 MB
 in-memory device:
@@ -40,11 +42,22 @@ SNOW_HD20_MODEL=Early512Ke SNOW_HD20_STEPS=12000000 \
 ```
 
 Set `SNOW_HD20_IMAGE` to use a disk image and `SNOW_HD20_FLOPPY` to insert a
-boot floppy. A base HFS partition may need an Apple partition map added first:
+boot floppy. Additional harness gates are available:
 
 ```bash
-../scripts/make-device-image.py input.dsk output-device.dsk
+SNOW_HD20_IMAGE="/absolute/path/to/flat-hfs.dsk" \
+SNOW_HD20_MIN_READ_RESPONSES=100 \
+SNOW_HD20_MIN_WRITES=1 \
+SNOW_HD20_STEPS=100000000 \
+  cargo test -p snow_core mac_plus_rom_reaches_hd20_read -- --ignored --nocapture
 ```
+
+**Image-layout finding:** use a flat HFS volume for HD20, with its boot blocks
+at sectors 0 and 1. Infinite Mac's `System 5.1 HD.dsk` boots as-is. Processing
+it through `make-device-image.py` adds an Apple partition/driver map; the Plus
+then reads the first two map sectors but does not continue booting. Device
+images with partition maps remain appropriate for SCSI, but are not the
+validated HD20 layout.
 
 ### Findings from ROM bring-up
 
@@ -75,19 +88,24 @@ Other bugs and useful observations:
 6. The Mac dictates the response group count in the command header
    (`resp_groups`); send exactly that many groups and recompute the checksum
    when resizing a natural response.
-7. `SEL`, not `LSTRB`, is the floppy-port CA3/daisy-chain selection signal in
+7. A multi-sector Read is **not** one large response transfer. The device must
+   send one separately handshaked response per sector. The response count byte
+   includes the sector in that response, so it counts from the requested value
+   down to `1`, not from `count - 1` down to `0`.
+8. HOFF completes the current encoded 8-byte group. Resume sends `0xAA` and
+   continues with the next group; it does not replay the interrupted group.
+9. `SEL`, not `LSTRB`, is the floppy-port CA3/daisy-chain selection signal in
    Snow. `SEL` comes from VIA port A; `LSTRB` is the floppy register latch
    strobe.
-8. An attached DCD must be notified when the external port's effective
+10. An attached DCD must be notified when the external port's effective
    `!ENBL` deasserts. Passing `enable && extdrive` and updating the DCD even
    while the internal port is selected prevents stale selection state.
-9. Controller Status is 343 payload bytes / 49 encoded groups. The implemented
+11. Controller Status is 343 payload bytes / 49 encoded groups. The implemented
    status uses real-HD20-compatible device/manufacturer `0x0001`/`0x0001`,
    characteristics `0xE6`, and highest addressable block (`count - 1`).
-10. HOFF handling and single-device CA3 phantom selection are implemented and
-    unit-tested, but the ROM smoke did not exercise HOFF. Future work should
-    validate interrupted long transfers against real hardware or a stronger
-    reference.
+12. HOFF handling and single-device CA3 phantom selection are unit-tested, but
+    the ROM boot runs observed so far did not exercise HOFF. Future work should
+    still validate interrupted transfers against real hardware.
 
 The BMOW article's SonyVars offsets were especially useful for diagnosing ROM
 failures. `SonyVars` is pointed to by low-memory address `0x134`;
@@ -511,9 +529,10 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   detection states) around the Phase 1 engine; `Swim`/`iwm.rs` route phase
   changes, the SENSE bit, and a paced data-register response stream to it when
   the external port has a DCD device. Covered by controller-level, bus-level,
-  and ignored real-ROM smoke tests. Both Plus and 512Ke accept status and issue
-  a block read. Full read completion, write behavior under a booted OS, HOFF in
-  real software, and mounting/booting remain follow-up validation.)*
+  and ignored real-ROM smoke tests. Plus and 512Ke accept status and complete
+  multi-sector reads. A Plus booting the flat System 5.1 HFS image completes
+  more than 100 read responses and a ROM-issued write with no DCD error.
+  HOFF remains unit-tested rather than observed in a ROM boot.)*
 
   Confirmed wiring details:
   - !HSHK is active-low on the SENSE bit; detection drives RD low in state 5
@@ -534,6 +553,13 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
 * **Deliverable:** attach/detach an HD20 from the UI on a 128K-ROM machine and
   boot from it.
 
+*(Implemented for the native egui frontend. `MacModel::dcd_max_devices()` is 4
+for Early512K, Early512Ke, and Plus and 0 elsewhere; Snow still emulates one
+device. `EmulatorStatus` reports the image and capacity, unsupported models
+reject attachment, and the Drives menu can create/load/detach an HD20. Created
+images default to 20 MB and native mmap-backed writes persist to the file.
+There is no TUI crate in this repository.)*
+
 ### Phase 4 — 64K-ROM boot-floppy path (Macintosh 512K)
 
 * Set `dcd_max_devices` for `Early512K` (keep `Early128K` at 0 — no RAM for HFS).
@@ -545,6 +571,31 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
   must be inserted at every cold boot and self-ejects.
 * **Deliverable:** a stock 512K boots the HD20 Startup floppy and mounts the
   HD20.
+
+*(Implemented and validated. With `Mac-512K.rom`, the preserved 400K
+`HD 20 Startup v1.1.image`, and Infinite Mac's flat `System 3.2.dsk`, the
+floppy-loaded driver detects the HD20, completes reads, issues a write, and
+self-ejects the startup floppy with zero DCD error status.)*
+
+Reproduce the 512K validation with a stock 400K MFS HD 20 Startup image:
+
+```bash
+SNOW_HD20_ROM="/absolute/path/to/Mac-512K.rom" \
+SNOW_HD20_MODEL=Early512K \
+SNOW_HD20_FLOPPY="/absolute/path/to/HD 20 Startup v1.1.image" \
+SNOW_HD20_IMAGE="/absolute/path/to/System 3.2.dsk" \
+SNOW_HD20_MIN_READ_RESPONSES=20 \
+SNOW_HD20_MIN_WRITES=1 \
+SNOW_HD20_REQUIRE_FLOPPY_EJECT=1 \
+SNOW_HD20_STEPS=100000000 \
+  cargo test -p snow_core mac_plus_rom_reaches_hd20_read -- --ignored --nocapture
+```
+
+The startup image must be exactly a bootable 400K MFS disk containing the
+`Hard Disk 20` file; an ordinary System 2.0 disk is insufficient. A preserved
+image is linked as **HD 20 Startup [400K]** at
+<https://earlymacintosh.org/disk_images.html>. It must be inserted at every
+cold boot and should eject itself after loading the RAM-based HFS/DCD driver.
 
 ### Phase 5 — SWIM-based machines (SE FDHD, Mac II, IIx, IIcx, SE/30)
 
@@ -570,7 +621,9 @@ boot floppy, IWM vs. SWIM-in-IWM-mode) and *how many* devices the ROM allows.
 
 ### Phase 7 — Persistence, polish, regression tests
 
-* Writeback to the host image on flush/eject/quit via the existing mechanism.
+* Native `FileDiskImage` mmap write-through is implemented and covered by
+  `file_backed_write_persists`. Explicit flush/eject/quit semantics and the
+  Emscripten-backed persistence path remain future work.
 * Save-state (serde) support for the device, consistent with the rest of `Swim`.
 * Protocol unit tests (Phase 1) plus an integration smoke test that boots a ROM
   and round-trips a block.
@@ -605,14 +658,16 @@ and daisy-chaining (completeness).
 
 ## Reference implementations to port from
 
-* **lampmerchant/tashnotes** `macintosh/floppy/dcd/` — the most complete written
-  DCD protocol spec (state machine, framing, 7-to-8 encoding, payloads). Primary
-  source. (Linked in the task.)
-* **lampmerchant/tashtwenty** — working single-chip DCD device firmware; shows
-  the minimal viable command set (read/write/identify + faked rest).
+* **[lampmerchant/tashnotes](https://github.com/lampmerchant/tashnotes/tree/main/macintosh/floppy/dcd)**
+  — the most complete written DCD protocol spec (state machine, framing,
+  7-to-8 encoding, payloads). Primary source.
+* **[lampmerchant/tashtwenty](https://github.com/lampmerchant/tashtwenty)** —
+  working single-chip DCD device firmware; shows the minimal viable command set
+  (read/write/identify + faked rest).
 * **BMOW Floppy Emu** writeups ("Emulating the Apple HD20", "Reverse Engineering
-  the HD20") — narrative reverse-engineering of the line-level protocol and the
-  IWM quirks.
+  [the HD20](https://www.bigmessowires.com/2014/11/22/reverse-engineering-the-hd20/)")
+  — narrative reverse-engineering of the line-level protocol and the IWM
+  quirks.
 * **MAME** Macintosh driver — worth checking for an existing C++ DCD/HD20 device
   model to cross-reference behavior (treat as secondary; verify against the
   specs above).
