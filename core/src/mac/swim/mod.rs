@@ -3,15 +3,18 @@
 //! Floppy drive controller consisting of two different controllers:
 //! Integrated Wozniak Machine, Integrated Sander Machine.
 
+pub mod dcd;
 pub mod drive;
 pub mod ism;
 pub mod iwm;
 
 use std::collections::VecDeque;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use ism::{IsmError, IsmSetup, IsmStatus};
 
+use dcd::{DcdController, DcdStats};
 use drive::{DriveType, FloppyDrive};
 use iwm::{IwmMode, IwmStatus};
 use serde::{Deserialize, Serialize};
@@ -143,6 +146,13 @@ pub struct Swim {
 
     pub(crate) drives: [FloppyDrive; 3],
 
+    /// DCD (Hard Disk 20) device on the external floppy port, if attached
+    #[serde(skip)]
+    dcd: Option<DcdController>,
+    /// Cycle accumulator that paces DCD response bytes into the data register
+    #[serde(skip)]
+    dcd_byte_timer: Ticks,
+
     pub dbg_pc: u32,
     pub dbg_break: LatchingEvent,
 }
@@ -201,6 +211,8 @@ impl Swim {
             ism_write_prev_bit: false,
 
             enable: false,
+            dcd: None,
+            dcd_byte_timer: 0,
             dbg_pc: 0,
             dbg_break: LatchingEvent::default(),
         }
@@ -231,6 +243,39 @@ impl Swim {
     pub fn is_writing(&self) -> bool {
         self.write_buffer.is_some()
     }
+
+    /// Attaches a DCD (Hard Disk 20) device on the external port.
+    pub fn attach_dcd(&mut self, image: Box<dyn crate::mac::scsi::disk_image::DiskImage>) {
+        self.dcd = Some(DcdController::new(dcd::DcdDevice::new(image)));
+    }
+
+    pub fn detach_dcd(&mut self) {
+        self.dcd = None;
+        self.dcd_byte_timer = 0;
+    }
+
+    pub fn dcd_image_path(&self) -> Option<&Path> {
+        self.dcd.as_ref().and_then(DcdController::image_path)
+    }
+
+    pub fn dcd_capacity(&self) -> Option<usize> {
+        self.dcd
+            .as_ref()
+            .map(|dcd| dcd.block_count() * dcd::DCD_DATA_SIZE)
+    }
+
+    pub fn dcd_stats(&self) -> Option<DcdStats> {
+        self.dcd.as_ref().map(DcdController::stats)
+    }
+
+    /// True when a DCD device is selected and enabled on the external port.
+    fn dcd_selected(&self) -> bool {
+        self.enable && self.extdrive && self.dcd.as_ref().is_some_and(DcdController::is_selected)
+    }
+
+    /// Cycles between DCD response bytes presented in the data register,
+    /// modelling the 500 kHz serial bit rate at the 8 MHz base clock.
+    const DCD_TICKS_PER_BYTE: Ticks = 128;
 
     fn get_selected_drive(&self) -> &FloppyDrive {
         &self.drives[self.get_selected_drive_idx()]
@@ -326,7 +371,23 @@ impl Tickable for Swim {
             self.get_selected_drive_mut().ejecting = None;
         }
 
-        if self.get_selected_drive().is_running() {
+        let dcd_selected = self.dcd_selected();
+        if let Some(dcd) = self
+            .dcd
+            .as_mut()
+            .filter(|dcd| dcd_selected && dcd.is_sending())
+        {
+            self.dcd_byte_timer += ticks;
+            while self.dcd_byte_timer >= Self::DCD_TICKS_PER_BYTE {
+                if self.datareg != 0 {
+                    break;
+                }
+                self.dcd_byte_timer -= Self::DCD_TICKS_PER_BYTE;
+                if let Some(b) = dcd.next_send_byte() {
+                    self.datareg = b;
+                }
+            }
+        } else if self.get_selected_drive().is_running() {
             // Advance read/write operation
             match self.mode {
                 SwimMode::Iwm => self.iwm_tick(ticks)?,
@@ -429,5 +490,107 @@ impl Debuggable for Swim {
                 self.drives[2]
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    struct MemDisk(Vec<u8>);
+    impl crate::mac::scsi::disk_image::DiskImage for MemDisk {
+        fn byte_len(&self) -> usize {
+            self.0.len()
+        }
+        fn read_bytes(&self, offset: usize, length: usize) -> Vec<u8> {
+            self.0[offset..offset + length].to_vec()
+        }
+        fn write_bytes(&mut self, offset: usize, data: &[u8]) {
+            self.0[offset..offset + data.len()].copy_from_slice(data);
+        }
+        fn media_bytes(&self) -> Option<&[u8]> {
+            Some(&self.0)
+        }
+        fn image_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    /// IWM register access address for the given line (bits A9-A12 select it).
+    fn reg(action: u16) -> Address {
+        (action as Address) << 9
+    }
+
+    /// Reads the IWM status register SENSE bit (bit 7).
+    fn read_sense_bit(swim: &mut Swim) -> bool {
+        swim.write(reg(13), 0); // q6 on
+        swim.write(reg(14), 0); // q7 off
+        swim.read(reg(13)).unwrap() & 0x80 != 0
+    }
+
+    fn swim_with_dcd() -> Swim {
+        let mut swim = Swim::new(&[DriveType::GCR800K, DriveType::GCR800K], false, 8_000_000);
+        swim.attach_dcd(Box::new(MemDisk(vec![0u8; 512 * 64])));
+        swim.write(reg(11), 0); // external port
+        swim.write(reg(9), 0); // enable
+        swim
+    }
+
+    /// The DCD device is detected via the phase-line probe states: the device
+    /// drives RD low in state 5 and high in states 6 and 7.
+    #[test]
+    fn dcd_detection_sense_via_bus() {
+        let mut swim = swim_with_dcd();
+
+        // State 6 (CA2=1 CA1=1 CA0=0): sense high.
+        swim.write(reg(5), 0); // CA2 on
+        swim.write(reg(3), 0); // CA1 on
+        swim.write(reg(0), 0); // CA0 off
+        assert!(read_sense_bit(&mut swim));
+
+        // State 5 (CA2=1 CA1=0 CA0=1): sense low.
+        swim.write(reg(2), 0); // CA1 off
+        swim.write(reg(1), 0); // CA0 on
+        assert!(!read_sense_bit(&mut swim));
+    }
+
+    /// Without the external port selected, status reads fall through to the
+    /// floppy drive and the DCD device is not consulted.
+    #[test]
+    fn dcd_inactive_on_internal_port() {
+        let mut swim = swim_with_dcd();
+        swim.write(reg(10), 0); // internal port
+        assert!(!swim.dcd_selected());
+    }
+
+    #[test]
+    fn dcd_inactive_when_external_port_is_disabled() {
+        let mut swim = swim_with_dcd();
+        swim.write(reg(8), 0); // disable
+        assert!(!swim.dcd_selected());
+    }
+
+    #[test]
+    fn dcd_inactive_after_ca3_selects_next_device() {
+        let mut swim = swim_with_dcd();
+        let sense_reads = swim.dcd_stats().unwrap().sense_reads;
+
+        swim.sel = true;
+        swim.write(reg(0), 0); // propagate CA3 change
+        assert!(!swim.dcd_selected());
+
+        read_sense_bit(&mut swim);
+        assert_eq!(swim.dcd_stats().unwrap().sense_reads, sense_reads);
+    }
+
+    #[test]
+    fn dcd_attach_status_and_detach() {
+        let mut swim = swim_with_dcd();
+        assert_eq!(swim.dcd_capacity(), Some(512 * 64));
+        assert!(swim.dcd_image_path().is_none());
+        swim.detach_dcd();
+        assert_eq!(swim.dcd_capacity(), None);
+        assert!(swim.dcd_stats().is_none());
     }
 }

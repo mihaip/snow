@@ -50,7 +50,7 @@ use crate::mac::scsi::disk_image::DiskImage;
 use crate::mac::swim::Swim;
 use comm::{
     Breakpoint, EmulatorCommand, EmulatorCommandSender, EmulatorEvent, EmulatorEventReceiver,
-    EmulatorStatus, FddStatus, InputRecording, ScsiTargetStatus,
+    EmulatorStatus, FddStatus, Hd20Status, InputRecording, ScsiTargetStatus,
 };
 
 /// Mouse emulation mode
@@ -620,6 +620,14 @@ impl Emulator {
                                 .and_then(|d| d.eth_capture_status()),
                         })
                 }),
+                hd20: self
+                    .config
+                    .swim()
+                    .dcd_capacity()
+                    .map(|capacity| Hd20Status {
+                        image: self.config.swim().dcd_image_path().map(Path::to_path_buf),
+                        capacity,
+                    }),
                 speed: self.config.speed(),
                 effective_speed: self.config.effective_speed(),
             })))?;
@@ -866,6 +874,10 @@ impl Emulator {
 
     #[cfg(feature = "savestates")]
     fn save_state(&self, p: &Path, screenshot: Option<Vec<u8>>) -> Result<()> {
+        if self.config.swim().dcd_capacity().is_some() {
+            bail!("Save states are not supported while an HD20 is attached");
+        }
+
         let mut f = File::create(p)?;
         let time = Instant::now();
 
@@ -987,6 +999,31 @@ impl Tickable for Emulator {
                                 self.user_error(&format!("SCSI ID #{}: {:#}", id, e));
                             }
                         };
+                        self.status_update()?;
+                    }
+                    EmulatorCommand::AttachHd20(filename) => {
+                        use crate::mac::scsi::disk_image::FileDiskImage;
+                        if self.model.dcd_max_devices() == 0 {
+                            self.user_error(&format!(
+                                "{} does not support the Hard Disk 20",
+                                self.model
+                            ));
+                        } else {
+                            match FileDiskImage::open_block_sized(&filename, true, 512) {
+                                Ok(img) => {
+                                    self.config.swim_mut().attach_dcd(Box::new(img));
+                                    info!("HD20 attached, image '{}' loaded", filename.display());
+                                }
+                                Err(e) => {
+                                    self.user_error(&format!("Cannot attach HD20: {:#}", e));
+                                }
+                            }
+                        }
+                        self.status_update()?;
+                    }
+                    EmulatorCommand::DetachHd20 => {
+                        self.config.swim_mut().detach_dcd();
+                        info!("HD20 detached");
                         self.status_update()?;
                     }
                     EmulatorCommand::ScsiBranchHdd(id, filename) => {
@@ -1458,5 +1495,179 @@ impl Tickable for Emulator {
         }
 
         Ok(ticks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mac::scsi::disk_image::DiskImage;
+
+    struct MemDisk(Vec<u8>);
+
+    impl DiskImage for MemDisk {
+        fn byte_len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn read_bytes(&self, offset: usize, length: usize) -> Vec<u8> {
+            self.0[offset..offset + length].to_vec()
+        }
+
+        fn write_bytes(&mut self, offset: usize, data: &[u8]) {
+            self.0[offset..offset + data.len()].copy_from_slice(data);
+        }
+
+        fn media_bytes(&self) -> Option<&[u8]> {
+            Some(&self.0)
+        }
+
+        fn image_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    fn ram_be32(ram: &[u8], addr: usize) -> Option<u32> {
+        let bytes: [u8; 4] = ram.get(addr..addr + 4)?.try_into().ok()?;
+        Some(u32::from_be_bytes(bytes))
+    }
+
+    fn ram_byte(ram: &[u8], addr: usize) -> Option<u8> {
+        ram.get(addr).copied()
+    }
+
+    fn dump_bytes(ram: &[u8], addr: usize, len: usize) -> String {
+        ram.get(addr..addr + len)
+            .unwrap_or_default()
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn hd20_driver_diag(emulator: &Emulator) -> String {
+        let ram = emulator.config.ram();
+        let sony_vars = ram_be32(ram, 0x134).unwrap_or_default() as usize;
+        if sony_vars == 0 || sony_vars >= ram.len() {
+            return format!(
+                "pc={:06X}, SonyVars=<invalid {sony_vars:08X}>",
+                emulator.config.cpu_regs().pc
+            );
+        }
+
+        let dcd_cmd = sony_vars + 0x19C;
+        let status = sony_vars + 0x19E;
+        let tag_bytes = sony_vars + 0x1A2;
+        let last_status = sony_vars + 0x1BA;
+        let last_result = sony_vars + 0x1BE;
+        let dcd_flags = sony_vars + 0x1BF;
+        let chk_time = sony_vars + 0x1C0;
+        let max_time = sony_vars + 0x1C2;
+        let sts_buffer = sony_vars + 0x1C4;
+
+        format!(
+            concat!(
+                "pc={:06X}, SonyVars={:08X}, ",
+                "dcdCmd={:02X}, status={}, tagBytes=[{}], ",
+                "lastStatus={:08X} (err={:02X}), lastResult={:02X}, dcdFlags={:02X}, ",
+                "chkTime={}, maxTime={}, stsBuffer=[{}]"
+            ),
+            emulator.config.cpu_regs().pc,
+            sony_vars,
+            ram_byte(ram, dcd_cmd).unwrap_or_default(),
+            dump_bytes(ram, status, 4),
+            dump_bytes(ram, tag_bytes, 20),
+            ram_be32(ram, last_status).unwrap_or_default(),
+            ram_byte(ram, last_status).unwrap_or_default(),
+            ram_byte(ram, last_result).unwrap_or_default(),
+            ram_byte(ram, dcd_flags).unwrap_or_default(),
+            ram.get(chk_time..chk_time + 2)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map(u16::from_be_bytes)
+                .unwrap_or_default(),
+            ram.get(max_time..max_time + 2)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map(u16::from_be_bytes)
+                .unwrap_or_default(),
+            dump_bytes(ram, sts_buffer, 32),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires parent Infinite Mac ROM assets; run manually for HD20 bring-up"]
+    fn mac_plus_rom_reaches_hd20_read() -> Result<()> {
+        let rom_path = std::env::var("SNOW_HD20_ROM").map_or_else(
+            |_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../src/Data/Mac-Plus.rom")
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            |path| path,
+        );
+        let rom = std::fs::read(&rom_path)
+            .with_context(|| format!("failed to read ROM from {rom_path}"))?;
+        let model = std::env::var("SNOW_HD20_MODEL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(MacModel::Plus);
+        let (mut emulator, _) = Emulator::new(&rom, &[], model)?;
+
+        if let Ok(path) = std::env::var("SNOW_HD20_FLOPPY") {
+            let floppy = Autodetect::load_file(&path)
+                .with_context(|| format!("failed to load floppy image from {path}"))?;
+            emulator.config.swim_mut().disk_insert(0, floppy)?;
+        }
+
+        let disk = if let Ok(path) = std::env::var("SNOW_HD20_IMAGE") {
+            std::fs::read(&path)
+                .with_context(|| format!("failed to read HD20 image from {path}"))?
+        } else {
+            vec![0; 20 * 1024 * 1024]
+        };
+        emulator
+            .config
+            .swim_mut()
+            .attach_dcd(Box::new(MemDisk(disk)));
+
+        let max_steps = std::env::var("SNOW_HD20_STEPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000_000);
+        let min_read_responses = std::env::var("SNOW_HD20_MIN_READ_RESPONSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let min_writes = std::env::var("SNOW_HD20_MIN_WRITES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let require_floppy_eject = std::env::var("SNOW_HD20_REQUIRE_FLOPPY_EJECT")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
+        let mut last_stats = None;
+        let mut last_command_count = 0;
+        for _ in 0..max_steps {
+            emulator.step()?;
+            let stats = emulator.config.swim().dcd_stats().unwrap_or_default();
+            if stats.commands != last_command_count {
+                eprintln!("DCD stats: {stats:?}");
+                eprintln!("HD20 ROM diag: {}", hd20_driver_diag(&emulator));
+                last_command_count = stats.commands;
+            }
+            last_stats = Some(stats);
+            if stats.read_responses_completed >= min_read_responses
+                && stats.write_commands >= min_writes
+                && (!require_floppy_eject || !emulator.config.swim().drives[0].floppy_inserted)
+            {
+                return Ok(());
+            }
+        }
+
+        bail!(
+            "Mac ROM did not reach the requested HD20 read/write thresholds; final DCD stats: {:?}; {}",
+            last_stats,
+            hd20_driver_diag(&emulator)
+        );
     }
 }

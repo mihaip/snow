@@ -124,6 +124,25 @@ impl Swim {
             15 => self.q7 = true,
             _ => (),
         }
+
+        // Drive the DCD handshake when a device is attached to the external
+        // port. The DCD sees the external port's !ENBL, so selecting the
+        // internal port deasserts it even if the IWM ENABLE latch remains set.
+        let (ca2, ca1, ca0, sel, enable) = (
+            self.ca2,
+            self.ca1,
+            self.ca0,
+            self.sel,
+            self.enable && self.extdrive,
+        );
+        if let Some(dcd) = self.dcd.as_mut() {
+            let was_sending = dcd.is_sending();
+            dcd.update_phase(ca2, ca1, ca0, sel, enable);
+            if was_sending != dcd.is_sending() {
+                self.datareg = 0;
+                self.dcd_byte_timer = 0;
+            }
+        }
     }
 
     /// Read on the bus
@@ -143,9 +162,13 @@ impl Swim {
             }
             (true, false) => {
                 // Read status register
-                let sense = self
-                    .get_selected_drive()
-                    .read_sense(self.get_selected_drive_reg_u8());
+                let dcd_selected = self.dcd_selected();
+                let sense = if let Some(dcd) = self.dcd.as_mut().filter(|_| dcd_selected) {
+                    dcd.note_sense_read()
+                } else {
+                    self.get_selected_drive()
+                        .read_sense(self.get_selected_drive_reg_u8())
+                };
                 self.iwm_status.set_sense(sense);
                 self.iwm_status.set_mode_low(self.iwm_mode.mode_low());
                 self.iwm_status.set_enable(self.enable);
@@ -199,10 +222,19 @@ impl Swim {
                 self.iwm_mode.set_mode(value);
             }
             (true, true, true) => {
-                if self.write_buffer.is_some() {
-                    warn!("Disk write while write buffer not empty");
+                let dcd_selected = self.dcd_selected();
+                if let Some(dcd) = self
+                    .dcd
+                    .as_mut()
+                    .filter(|dcd| dcd_selected && dcd.is_receiving())
+                {
+                    dcd.write_data(value);
+                } else {
+                    if self.write_buffer.is_some() {
+                        warn!("Disk write while write buffer not empty");
+                    }
+                    self.write_buffer = Some(value);
                 }
-                self.write_buffer = Some(value);
             }
             _ => (),
         }

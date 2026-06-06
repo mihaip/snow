@@ -1,6 +1,6 @@
 use crate::dialogs::about::AboutDialog;
 use crate::dialogs::confirm::ConfirmDialog;
-use crate::dialogs::diskimage::{DiskImageDialog, DiskImageDialogResult};
+use crate::dialogs::diskimage::{DiskImageDialog, DiskImageDialogResult, DiskImageTarget};
 use crate::dialogs::filedialog::SnowFileDialog;
 use crate::dialogs::modelselect::{ModelSelectionDialog, ModelSelectionResult};
 use crate::emulator::EmulatorState;
@@ -190,6 +190,7 @@ pub struct SnowGui {
     workspace_dialog: SnowFileDialog,
     hdd_dialog: SnowFileDialog,
     hdd_dialog_idx: usize,
+    hd20_dialog: SnowFileDialog,
     cdrom_dialog: SnowFileDialog,
     cdrom_dialog_idx: usize,
     cdrom_files_dialog: SnowFileDialog,
@@ -387,6 +388,10 @@ impl SnowGui {
                 .initial_directory(Self::default_dir())
                 .storage(settings.fd_hdd),
             hdd_dialog_idx: 0,
+            hd20_dialog: SnowFileDialog::new()
+                .add_filter("HD20 images", &["img", "hda"])
+                .opening_mode(egui_file_dialog::OpeningMode::LastVisitedDir)
+                .initial_directory(Self::default_dir()),
             cdrom_dialog: SnowFileDialog::new()
                 .add_filter("CD-ROM images", &["iso", "toast", "cue"])
                 .opening_mode(egui_file_dialog::OpeningMode::LastVisitedDir)
@@ -620,7 +625,10 @@ impl SnowGui {
             file.write_all(&[0])?;
             file.flush()?;
         }
-        self.emu.scsi_attach_hdd(result.scsi_id, &result.filename);
+        match result.target {
+            DiskImageTarget::Scsi(id) => self.emu.scsi_attach_hdd(id, &result.filename),
+            DiskImageTarget::Hd20 => self.emu.hd20_attach(&result.filename),
+        }
         Ok(())
     }
 
@@ -781,6 +789,11 @@ impl SnowGui {
                 ui.menu_button("Drives", |ui| {
                     ui.set_min_width(Self::SUBMENU_WIDTH);
                     self.draw_menu_floppies(ui);
+
+                    if let Some(hd20) = self.emu.get_hd20_status().map(|d| d.cloned()) {
+                        ui.separator();
+                        self.draw_hd20_menu(ui, hd20.as_ref());
+                    }
 
                     // Needs cloning for the later borrow to call create_disk_dialog.open()
                     let targets = self.emu.get_scsi_target_status().map(|d| d.to_owned());
@@ -1354,6 +1367,50 @@ impl SnowGui {
         });
     }
 
+    fn draw_hd20_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        hd20: Option<&snow_core::emulator::comm::Hd20Status>,
+    ) {
+        if let Some(hd20) = hd20 {
+            ui.menu_button(
+                format!(
+                    "{} HD20: {} ({:0.2}MB)",
+                    egui_material_icons::icons::ICON_HARD_DRIVE_2,
+                    hd20.image
+                        .as_ref()
+                        .and_then(|path| path.file_name())
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    hd20.capacity / 1024 / 1024
+                ),
+                |ui| {
+                    ui.set_min_width(Self::SUBMENU_WIDTH);
+                    if ui.button("Detach HD20").clicked() {
+                        self.emu.hd20_detach();
+                    }
+                },
+            );
+        } else {
+            ui.menu_button(
+                format!(
+                    "{} HD20: (no device)",
+                    egui_material_icons::icons::ICON_BLOCK
+                ),
+                |ui| {
+                    ui.set_min_width(Self::SUBMENU_WIDTH + 50.0);
+                    if ui.button("Create new HD20 image...").clicked() {
+                        self.create_disk_dialog.open_hd20(&self.workspace_dir());
+                    }
+                    if ui.button("Load HD20 disk image...").clicked() {
+                        self.hd20_dialog
+                            .pick_file(self.settings.native_file_dialogs);
+                    }
+                },
+            );
+        }
+    }
+
     fn draw_scsi_target_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -1618,7 +1675,7 @@ impl SnowGui {
                 |ui| {
                     ui.set_min_width(Self::SUBMENU_WIDTH + 50.0);
                     if ui.button("Create new HDD image...").clicked() {
-                        self.create_disk_dialog.open(id, &self.workspace_dir());
+                        self.create_disk_dialog.open_scsi(id, &self.workspace_dir());
                     }
                     if ui.button("Load HDD disk image...").clicked() {
                         self.hdd_dialog_idx = id;
@@ -3375,6 +3432,13 @@ impl eframe::App for SnowGui {
             self.settings.save();
         }
         self.ui_active &= *self.hdd_dialog.state() != egui_file_dialog::DialogState::Open;
+
+        // HD20 image picker dialog
+        self.hd20_dialog.update(ctx, frame);
+        if let Some(path) = self.hd20_dialog.take_picked() {
+            self.emu.hd20_attach(&path);
+        }
+        self.ui_active &= *self.hd20_dialog.state() != egui_file_dialog::DialogState::Open;
 
         // CD-ROM image picker dialog
         self.cdrom_dialog.update(ctx, frame);

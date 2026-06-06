@@ -5,12 +5,11 @@ use eframe::egui;
 use crate::{dialogs::filedialog::SnowFileDialog, settings::AppSettings};
 
 /// Dialog to create a blank HDD image
-#[derive(Default)]
 pub struct DiskImageDialog {
     open: bool,
     current_fn: String,
     current_size: f64,
-    scsi_id: usize,
+    target: DiskImageTarget,
 
     browse_dialog: SnowFileDialog,
     result: Option<DiskImageDialogResult>,
@@ -19,7 +18,26 @@ pub struct DiskImageDialog {
 pub struct DiskImageDialogResult {
     pub filename: PathBuf,
     pub size: usize,
-    pub scsi_id: usize,
+    pub target: DiskImageTarget,
+}
+
+#[derive(Clone, Copy)]
+pub enum DiskImageTarget {
+    Scsi(usize),
+    Hd20,
+}
+
+impl Default for DiskImageDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            current_fn: String::new(),
+            current_size: 0.0,
+            target: DiskImageTarget::Scsi(0),
+            browse_dialog: SnowFileDialog::default(),
+            result: None,
+        }
+    }
 }
 
 impl DiskImageDialog {
@@ -57,10 +75,14 @@ impl DiskImageDialog {
             });
 
             ui.separator();
+            let target = match self.target {
+                DiskImageTarget::Scsi(id) => format!("SCSI ID #{}", id),
+                DiskImageTarget::Hd20 => "the external floppy port as an HD20".to_owned(),
+            };
             ui.label(format!(
-                "{} The new disk will be attached at SCSI ID #{}.",
+                "{} The new disk will be attached at {}.",
                 egui_material_icons::icons::ICON_INFO,
-                self.scsi_id
+                target
             ));
             ui.label("Machine should be reset after attaching new drives!");
             ui.separator();
@@ -75,7 +97,7 @@ impl DiskImageDialog {
                         self.result = Some(DiskImageDialogResult {
                             filename: PathBuf::from(&self.current_fn),
                             size,
-                            scsi_id: self.scsi_id,
+                            target: self.target,
                         });
                         self.open = false;
                     }
@@ -87,10 +109,21 @@ impl DiskImageDialog {
         });
     }
 
-    pub fn open(&mut self, scsi_id: usize, initial_path: &Path) {
-        let filename = format!("hdd{}.img", scsi_id);
+    pub fn open_scsi(&mut self, scsi_id: usize, initial_path: &Path) {
+        self.open(
+            DiskImageTarget::Scsi(scsi_id),
+            format!("hdd{}.img", scsi_id),
+            initial_path,
+        );
+    }
+
+    pub fn open_hd20(&mut self, initial_path: &Path) {
+        self.open(DiskImageTarget::Hd20, "hd20.img".to_owned(), initial_path);
+    }
+
+    fn open(&mut self, target: DiskImageTarget, filename: String, initial_path: &Path) {
         let full_path = initial_path.join(&filename);
-        self.scsi_id = scsi_id;
+        self.target = target;
         self.open = true;
         self.current_fn = full_path.to_string_lossy().into();
         self.current_size = 20.0;

@@ -44,6 +44,9 @@ pub enum EmulatorCommand {
     /// Parameters: drive id, enabled
     SetFloppyWriteback(usize, bool),
     ScsiAttachHdd(usize, PathBuf),
+    /// Attaches a DCD (Hard Disk 20) device on the external floppy port.
+    AttachHd20(PathBuf),
+    DetachHd20,
     ScsiBranchHdd(usize, PathBuf),
     ScsiAttachCdrom(usize),
     ScsiLoadMedia(usize, PathBuf),
@@ -132,6 +135,7 @@ pub struct EmulatorStatus {
     pub speed: EmulatorSpeed,
     pub effective_speed: f64,
     pub scsi: [Option<ScsiTargetStatus>; 7],
+    pub hd20: Option<Hd20Status>,
 }
 
 #[cfg(feature = "ethernet")]
@@ -152,6 +156,12 @@ pub struct ScsiTargetStatus {
     pub link_type: Option<EthernetLinkType>,
     #[cfg(feature = "ethernet")]
     pub capture_status: Option<EthernetCaptureStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Hd20Status {
+    pub image: Option<PathBuf>,
+    pub capacity: usize,
 }
 
 #[derive(Debug, Clone)]

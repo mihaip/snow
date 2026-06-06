@@ -185,6 +185,15 @@ impl MacModel {
         }
     }
 
+    /// Maximum number of DCD devices recognized by this model's supported
+    /// software path. Snow currently emulates the first device only.
+    pub const fn dcd_max_devices(self) -> usize {
+        match self {
+            Self::Early512K | Self::Early512Ke | Self::Plus => 4,
+            _ => 0,
+        }
+    }
+
     pub const fn keymap(self) -> Keymap {
         match self {
             Self::Early128K | Self::Early512K | Self::Early512Ke | Self::Plus => Keymap::AkM0110,
@@ -411,6 +420,15 @@ impl MacMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dcd_capability_matches_supported_initial_models() {
+        assert_eq!(MacModel::Early128K.dcd_max_devices(), 0);
+        assert_eq!(MacModel::Early512K.dcd_max_devices(), 4);
+        assert_eq!(MacModel::Early512Ke.dcd_max_devices(), 4);
+        assert_eq!(MacModel::Plus.dcd_max_devices(), 4);
+        assert_eq!(MacModel::SE.dcd_max_devices(), 0);
+    }
 
     #[test]
     fn interleave_early_plus() {
