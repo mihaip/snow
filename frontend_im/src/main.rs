@@ -34,6 +34,8 @@ fn main() {
     let printer_output_dir: Option<String> =
         args.opt_value_from_str("--printer-output-dir").unwrap();
     let gestalt_id: u32 = args.value_from_str("--gestalt-id").unwrap();
+    let mac_model_modifier: Option<String> =
+        args.opt_value_from_str("--mac-model-modifier").unwrap();
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
     let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
@@ -45,7 +47,7 @@ fn main() {
 
     let rom_data = std::fs::read(&rom_path).expect("Failed to read ROM");
 
-    let model = model_from_gestalt(gestalt_id)
+    let model = model_from_gestalt(gestalt_id, mac_model_modifier.as_deref())
         .unwrap_or_else(|| panic!("Unknown gestalt ID {} (no matching Snow model)", gestalt_id));
     if !model.ram_size_options().contains(&ram_size) {
         panic!(
@@ -88,7 +90,9 @@ fn main() {
         mouse_mode,
         Some(ram_size),
         None,
-        false,
+        // We don't expose a separate PPMU option, so just trigger it for the
+        // FDHD model.
+        model == MacModel::MacIIFDHD,
         None,
     )
     .expect("Failed to create emulator");
@@ -237,9 +241,16 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
 
 const PRINTER_SCSI_SCAN_ORDER: [usize; 7] = [4, 3, 2, 1, 0, 6, 5];
 
-fn model_from_gestalt(gestalt_id: u32) -> Option<MacModel> {
-    GESTALT_MODEL_MAP
+fn model_from_gestalt(gestalt_id: u32, modifier: Option<&str>) -> Option<MacModel> {
+    let model = GESTALT_MODEL_MAP
         .iter()
         .find(|(id, _)| *id == gestalt_id)
-        .map(|(_, model)| *model)
+        .map(|(_, model)| *model)?;
+
+    match (model, modifier) {
+        (MacModel::SE, Some("FDHD")) => Some(MacModel::SeFdhd),
+        (MacModel::MacII, Some("FDHD")) => Some(MacModel::MacIIFDHD),
+        (_, Some(_)) => None, // Unknown modifier
+        _ => Some(model),
+    }
 }
