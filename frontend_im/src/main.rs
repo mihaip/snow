@@ -7,16 +7,19 @@ use snow_core::tickable::Tickable;
 use std::sync::{Arc, Mutex};
 
 use crate::cdrom::CdromManager;
+use crate::floppy_manager::FloppyManager;
 
 mod audio;
 mod cdrom;
 mod clipboard;
 mod disk;
 mod floppy;
+mod floppy_manager;
 mod framebuffer;
 mod input;
 mod js_api;
 mod memory;
+mod removable_media;
 
 fn main() {
     env_logger::Builder::new()
@@ -159,6 +162,7 @@ fn main() {
 
     let cmd_sender = emulator.create_cmd_sender();
     let event_recv = emulator.create_event_recv();
+    let mut floppy_manager = FloppyManager::new(cmd_sender.clone());
     let mut floppy_drive = 0usize;
     for floppy_name in floppy_names {
         if floppy_drive >= 3 {
@@ -216,6 +220,7 @@ fn main() {
         if let Some(cdrom_manager) = cdrom_manager.as_mut() {
             cdrom_manager.tick(&mut emulator, last_status.as_deref());
         }
+        floppy_manager.tick(&mut emulator, last_status.as_deref());
 
         if let Err(e) = emulator.tick(1, ()) {
             log::error!("Emulator tick error: {:?}", e);
