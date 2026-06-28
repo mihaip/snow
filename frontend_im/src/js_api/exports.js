@@ -3,6 +3,16 @@
 // outside of it.
 
 mergeInto(LibraryManager.library, {
+    $snowNameToCString(name) {
+        if (!name || !name.length) {
+            return 0;
+        }
+        const nameLength = lengthBytesUTF8(name) + 1;
+        const nameCstr = _malloc(nameLength);
+        stringToUTF8(name, nameCstr, nameLength);
+        return nameCstr;
+    },
+
     // Runtime
     js_sleep(seconds) {
         workerApi.sleep(seconds);
@@ -57,15 +67,13 @@ mergeInto(LibraryManager.library, {
     js_disk_write(diskId, bufPtr, offset, length) {
         return workerApi.disks.write(diskId, bufPtr, offset, length);
     },
+    js_consume_cdrom_name__deps: ["$snowNameToCString"],
     js_consume_cdrom_name() {
-        const diskName = workerApi.disks.consumeCdromName();
-        if (!diskName || !diskName.length) {
-            return 0;
-        }
-        const diskNameLength = lengthBytesUTF8(diskName) + 1;
-        const diskNameCstr = _malloc(diskNameLength);
-        stringToUTF8(diskName, diskNameCstr, diskNameLength);
-        return diskNameCstr;
+        return snowNameToCString(workerApi.disks.consumeCdromName());
+    },
+    js_consume_floppy_name__deps: ["$snowNameToCString"],
+    js_consume_floppy_name() {
+        return snowNameToCString(workerApi.disks.consumeFloppyName());
     },
     js_free(ptr) {
         _free(ptr);
