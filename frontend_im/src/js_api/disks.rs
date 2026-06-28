@@ -8,6 +8,7 @@ extern "C" {
     fn js_disk_read(disk_id: i32, buf_ptr: *mut u8, offset: f64, length: f64) -> f64;
     fn js_disk_write(disk_id: i32, buf_ptr: *const u8, offset: f64, length: f64) -> f64;
     fn js_consume_cdrom_name() -> *mut c_char;
+    fn js_consume_floppy_name() -> *mut c_char;
     fn js_free(ptr: *mut c_void);
 }
 
@@ -97,8 +98,7 @@ impl Drop for DiskHandle {
     }
 }
 
-pub fn consume_cdrom_name() -> Option<String> {
-    let name_ptr = unsafe { js_consume_cdrom_name() };
+fn consume_name(name_ptr: *mut c_char) -> Option<String> {
     if name_ptr.is_null() {
         return None;
     }
@@ -109,4 +109,12 @@ pub fn consume_cdrom_name() -> Option<String> {
         js_free(name_ptr as *mut c_void);
     }
     Some(name)
+}
+
+pub fn consume_cdrom_name() -> Option<String> {
+    consume_name(unsafe { js_consume_cdrom_name() })
+}
+
+pub fn consume_floppy_name() -> Option<String> {
+    consume_name(unsafe { js_consume_floppy_name() })
 }
