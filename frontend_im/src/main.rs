@@ -78,6 +78,7 @@ fn main() {
     for (rom_path, data) in &extra_rom_data {
         let data_ref = data.as_slice();
         let rom = match rom_path.as_str() {
+            "mac-ii-display-card.rom" => ExtraROMs::Toby(data_ref),
             "mac-ii-display-card-8-24.rom" => ExtraROMs::MDC12(data_ref),
             "se30-video.rom" => ExtraROMs::SE30Video(data_ref),
             "extension.rom" => ExtraROMs::ExtensionROM(data_ref),
