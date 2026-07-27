@@ -13,10 +13,10 @@ pub struct CdromManager {
 impl CdromManager {
     pub fn new(emulator: &mut Emulator, scsi_id: usize, cdrom_names: Vec<String>) -> Option<Self> {
         if scsi_id >= ScsiController::MAX_TARGETS {
-            log::warn!(
+            js_api::runtime::report_error(&format!(
                 "No available SCSI slots for CD-ROM drives (first ID {})",
                 scsi_id
-            );
+            ));
             return None;
         }
 
@@ -67,16 +67,17 @@ impl MediaHandler for CdromMedia {
                     log::info!("SCSI ID #{}: CD-ROM image '{}' loaded", scsi_id, name);
                 }
                 Err(err) => {
-                    log::error!(
+                    js_api::runtime::report_error(&format!(
                         "Failed to attach CD-ROM image '{}' at SCSI ID #{}: {}",
-                        name,
-                        scsi_id,
-                        err
-                    );
+                        name, scsi_id, err
+                    ));
                 }
             },
             Err(err) => {
-                log::error!("Failed to open CD-ROM image '{}': {}", name, err);
+                js_api::runtime::report_error(&format!(
+                    "Failed to open CD-ROM image '{}': {}",
+                    name, err
+                ));
             }
         }
         MediaInsertResult::Done

@@ -20,6 +20,9 @@ mergeInto(LibraryManager.library, {
     js_check_for_periodic_tasks() {
         workerApi.checkForPeriodicTasks();
     },
+    js_report_error(errorPtr) {
+        workerApi.reportError(UTF8ToString(errorPtr));
+    },
     js_update_emulator_stats_json(statsJsonPtr) {
         const statsJson = UTF8ToString(statsJsonPtr);
         try {
