@@ -1,6 +1,6 @@
 use disk::JsDiskImage;
 use floppy::load_floppy_image;
-use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus};
+use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus, UserMessageType};
 use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
@@ -167,7 +167,10 @@ fn main() {
     let mut floppy_drive = 0usize;
     for floppy_name in floppy_names {
         if floppy_drive >= 3 {
-            log::warn!("Skipping floppy '{}': no free drive (max 3)", floppy_name);
+            js_api::runtime::report_error(&format!(
+                "Failed to insert floppy '{}': no free drive (max 3)",
+                floppy_name
+            ));
             continue;
         }
         match load_floppy_image(&floppy_name) {
@@ -177,13 +180,19 @@ fn main() {
                     Box::new(img),
                     false,
                 )) {
-                    log::error!("Failed to insert floppy '{}': {}", floppy_name, err);
+                    js_api::runtime::report_error(&format!(
+                        "Failed to insert floppy '{}': {}",
+                        floppy_name, err
+                    ));
                 } else {
                     floppy_drive += 1;
                 }
             }
             Err(err) => {
-                log::error!("Failed to open floppy '{}': {}", floppy_name, err);
+                js_api::runtime::report_error(&format!(
+                    "Failed to open floppy '{}': {}",
+                    floppy_name, err
+                ));
             }
         }
     }
@@ -209,6 +218,13 @@ fn main() {
                 EmulatorEvent::Memory((addr, data, size)) => {
                     memory_mirror.update(addr, &data, size);
                 }
+                EmulatorEvent::UserMessage(message_type, message) => match message_type {
+                    UserMessageType::Error => js_api::runtime::report_error(&message),
+                    UserMessageType::Warning => log::warn!("{}", message),
+                    UserMessageType::Notice | UserMessageType::Success => {
+                        log::info!("{}", message);
+                    }
+                },
                 _ => {}
             }
         }
@@ -224,7 +240,7 @@ fn main() {
         floppy_manager.tick(&mut emulator, last_status.as_deref());
 
         if let Err(e) = emulator.tick(1, ()) {
-            log::error!("Emulator tick error: {:?}", e);
+            js_api::runtime::report_error(&format!("Emulator tick error: {:#}", e));
             break;
         }
 
