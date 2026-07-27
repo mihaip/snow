@@ -56,7 +56,10 @@ impl MediaHandler for FloppyMedia {
                     pending.image = Some(image);
                 }
                 Err(err) => {
-                    log::error!("Failed to open floppy '{}': {}", pending.name, err);
+                    js_api::runtime::report_error(&format!(
+                        "Failed to open floppy '{}': {}",
+                        pending.name, err
+                    ));
                     return MediaInsertResult::Drop;
                 }
             }
@@ -67,11 +70,10 @@ impl MediaHandler for FloppyMedia {
             drive.present && drive.drive_type.compatible_floppies().contains(&image_type)
         });
         if !any_compatible_drive {
-            log::error!(
-                "No compatible floppy drive for '{}' ({:?}), dropping insertion",
-                pending.name,
-                image_type
-            );
+            js_api::runtime::report_error(&format!(
+                "Could not insert floppy '{}': no compatible drive for {}",
+                pending.name, image_type
+            ));
             return MediaInsertResult::Drop;
         }
 
@@ -97,12 +99,10 @@ impl MediaHandler for FloppyMedia {
                 log::info!("Drive {}: floppy image '{}' queued", drive, pending.name);
             }
             Err(err) => {
-                log::error!(
+                js_api::runtime::report_error(&format!(
                     "Failed to queue floppy image '{}' for drive {}: {}",
-                    pending.name,
-                    drive,
-                    err
-                );
+                    pending.name, drive, err
+                ));
             }
         }
         MediaInsertResult::DoneAndWaitForStatus
