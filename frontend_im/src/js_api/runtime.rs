@@ -5,6 +5,7 @@ use serde::Serialize;
 
 extern "C" {
     fn js_check_for_periodic_tasks();
+    fn js_report_error(error: *const c_char);
     fn js_sleep(secs: f64);
     fn js_update_emulator_stats_json(stats_json: *const c_char);
 }
@@ -18,6 +19,16 @@ pub fn check_for_periodic_tasks() {
 pub fn sleep_seconds(secs: f64) {
     unsafe {
         js_sleep(secs);
+    }
+}
+
+pub fn report_error(error: &str) {
+    let Ok(error) = CString::new(error) else {
+        log::warn!("Skipping emulator error containing an interior NUL byte");
+        return;
+    };
+    unsafe {
+        js_report_error(error.as_ptr());
     }
 }
 
