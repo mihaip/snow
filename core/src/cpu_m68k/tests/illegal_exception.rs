@@ -420,7 +420,7 @@ fn test_all_illegal_opcodes() {
 #[test]
 fn trap_callbacks_do_not_stop_or_execute_handler() {
     for include_memory in [false, true] {
-        for opcode in [0xa99a, 0xab9a] {
+        for opcode in [0xa99a, 0xad9a] {
             let mut cpu = testcpu(0x8000, 0x1000, &[opcode, 0x4e71]);
             write_long(&mut cpu, 0x28, 0x400);
             write_word(&mut cpu, 0x400, 0x7007); // MOVEQ #7,D0

@@ -33,6 +33,12 @@ pub enum EmulatorCommand {
     /// Replace non-stopping A-line callbacks: (exact opcode, include RAM delta).
     /// An empty list unregisters all callbacks. Does not alter debugger breakpoints.
     SetTrapCallbacks(Vec<(u16, bool)>),
+    /// Observe trap and indirect subroutine entry/return with registers and RAM.
+    SetExecutionCallbacks {
+        traps: Vec<u16>,
+        vectors: Vec<u32>,
+        include_memory: bool,
+    },
     Quit,
     /// Inserts a floppy image, passing the image as boxed object.
     /// Parameters: drive id, image, write-protect
@@ -193,6 +199,13 @@ pub enum UserMessageType {
 /// A status message/event received from the emulator
 #[derive(strum::Display)]
 pub enum EmulatorEvent {
+    CallObservation {
+        source: u32,
+        returning: bool,
+        entry: RegisterFile,
+        registers: RegisterFile,
+        memory: Vec<(Address, Vec<u8>, usize)>,
+    },
     /// After A-line exception entry, before any trap-handler instruction executes.
     /// Optional RAM updates share the ordered Memory-event delta stream and must
     /// be applied before invoking a frontend callback. CPU execution is not paused.

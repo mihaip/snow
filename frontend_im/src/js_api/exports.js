@@ -14,6 +14,9 @@ mergeInto(LibraryManager.library, {
     },
 
     // Runtime
+    js_inspector_call(ptr, length, source, returning, handle, reference, resourceType, pc) {
+        workerApi.inspector?.callObserved(HEAPU8.subarray(ptr, ptr + length), source, !!returning, handle, reference, resourceType, pc);
+    },
     js_inspector_before_close(ptr, length) {
         try {
             workerApi.inspector?.beforeResourceFileClose(HEAPU8.subarray(ptr, ptr + length));
@@ -25,8 +28,8 @@ mergeInto(LibraryManager.library, {
     js_inspector_active() {
         return workerApi.inspector?.active() ? 1 : 0;
     },
-    js_inspector_capture(ptr, length) {
-        workerApi.inspector?.capture(HEAPU8.subarray(ptr, ptr + length));
+    js_inspector_tick(ptr, length) {
+        workerApi.inspector?.tick(HEAPU8.subarray(ptr, ptr + length));
     },
     js_sleep(seconds) {
         workerApi.sleep(seconds);

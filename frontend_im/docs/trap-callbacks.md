@@ -2,7 +2,7 @@
 
 `EmulatorCommand::SetTrapCallbacks(Vec<(u16, bool)>)` replaces the registered
 A-line opcode callbacks. The boolean requests a memory-view update. Pass an empty
-list to unregister; opcodes match exactly (register both A99A and AB9A for
+list to unregister; opcodes match exactly (register both A99A and AD9A for
 CloseResFile and its Toolbox auto-pop variant). Non-A-line opcodes are ignored.
 These registrations are separate from debugger breakpoints and are not saved in
 save states.
@@ -22,11 +22,10 @@ payload before invoking their callback. They must not defer callbacks until afte
 later events have changed the mirror. A newly attached receiver needs the normal
 initial mirror baseline; these are deltas, not standalone full-RAM snapshots.
 
-The Infinite Mac frontend registers CloseResFile only while inspection is active
-(including the collapsed grace period) and unpaused. It applies each payload and
-immediately calls the existing beforeResourceFileClose capture on the mirror.
-The JS inspector rechecks active state, so queued events cannot update a paused
-capture. Publication remains periodic. Registration changes take effect when the
+The original Infinite Mac frontend used this for CloseResFile. Resource event
+capture now uses the entry/return protocol below. Registrations are active only
+while inspection is enabled (including the collapsed grace period) and unpaused.
+The JS inspector rechecks active state. Registration changes take effect when the
 emulator processes its command queue; they are not synchronous acknowledgements.
 
 Unlike the synchronous Basilisk II JS hook, Snow can continue emulating before
@@ -45,3 +44,42 @@ CloseResFile capture populated the cache without periodic RAM sampling. The
 snapshot still labels the resource resident because it describes the pre-close
 state; normal periodic capture subsequently reconciles that status. The temporary
 sampling override was restored after validation.
+
+
+## Entry and return observations
+
+`SetExecutionCallbacks { traps, vectors, include_memory }` replaces a second,
+independent registration set. `traps` contains exact A-line opcodes; `vectors`
+contains guest addresses of indirect subroutine pointers. The event source is
+either the trap opcode or the vector address. An empty configuration disables
+instruction observation. `include_memory` is optional copying, not optional
+execution observation: false leaves RAM dirty bits untouched and sends an empty
+memory payload.
+
+Before each instruction, the observer checks for registered entries and pending
+returns. Trap return matching uses PC and SP, allowing up to 64 bytes of Pascal
+argument cleanup. Vector calls require the exact post-return SP. Toolbox auto-pop
+(bit 10, $0400) reads the caller's return PC from the stack. Pending calls survive
+process switches and nested calls; the bounded 4,096-entry set is cleared on
+reconfiguration. Unwinding, saved direct trap addresses, and unconventional stack
+tricks can bypass return matching. Entry observations and periodic scans provide
+additional coverage, but these are observations, not an execution trace proof.
+
+`CallObservation` includes entry registers and current registers. With memory
+enabled, its owned dirty pages have the same ordering and baseline requirements
+as the original protocol. Infinite Mac consumes each delta and invokes JS before
+applying the next event. It watches Resource Manager entry/return, common Toolbox
+consumers, and the resource-loader vector at $07F0. For the latter it preserves
+entry D3 (resource type) and reads returned A0 (handle) and A2 (reference). The JS
+reader verifies that reference+8 still points at the handle before attribution.
+
+The event collector copies the resource's entire valid RAM heap block immediately.
+A loader callback is retained even if the handle was already observed resident;
+it does not prove a physical disk read. Scan-only discoveries are labeled
+“First observed.” The browser catalog is reconstructed from retained events.
+
+The observer borrows the CPU register file on the ordinary instruction path; only
+actual entries/returns clone registers. Trap lookup first rejects non-A-line
+opcodes. A counting PC filter rejects most pending-return checks without walking
+calls belonging to suspended processes; collisions still require exact PC/SP
+matches. Neither optimization changes callback or memory-delta coverage.

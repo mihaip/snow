@@ -1,4 +1,5 @@
 pub mod comm;
+mod execution_callbacks;
 
 #[cfg(feature = "savestates")]
 pub mod save;
@@ -171,6 +172,29 @@ enum EmulatorConfig {
     MacII30(Box<CpuM68030Fpu<MacIIBus<ChannelRenderer, false>>>),
 }
 
+impl EmulatorConfig {
+    fn observe_execution(
+        &mut self,
+        callbacks: &mut execution_callbacks::ExecutionCallbacks,
+    ) -> Vec<execution_callbacks::CallObservation> {
+        // Borrow registers and bus separately. Cloning the full register file
+        // here would also clone all eight software FPU values every instruction.
+        macro_rules! observe {
+            ($cpu:expr) => {{
+                let cpu = $cpu;
+                callbacks.observe(&cpu.regs, |addr| cpu.bus.inspect_read(addr))
+            }};
+        }
+        match self {
+            Self::Compact(cpu) => observe!(cpu),
+            Self::Portable(cpu) => observe!(cpu),
+            Self::MacII(cpu) => observe!(cpu),
+            Self::MacIIPmmu(cpu) => observe!(cpu),
+            Self::MacII30(cpu) => observe!(cpu),
+        }
+    }
+}
+
 dispatch! {
     immutable_refs {
         fn swim(&self) -> &Swim { bus.swim }
@@ -248,6 +272,7 @@ pub trait EmuContext {
 /// Emulator runner
 pub struct Emulator {
     config: EmulatorConfig,
+    execution_callbacks: execution_callbacks::ExecutionCallbacks,
     command_recv: crossbeam_channel::Receiver<EmulatorCommand>,
     command_sender: EmulatorCommandSender,
     event_sender: crossbeam_channel::Sender<EmulatorEvent>,
@@ -489,6 +514,7 @@ impl Emulator {
 
         let mut emu = Self {
             config,
+            execution_callbacks: Default::default(),
             command_recv: cmdr,
             command_sender: cmds,
             event_sender: statuss,
@@ -542,6 +568,7 @@ impl Emulator {
 
         let mut emu = Self {
             config,
+            execution_callbacks: Default::default(),
             command_recv: cmdr,
             command_sender: cmds,
             event_sender: statuss,
@@ -729,6 +756,38 @@ impl Emulator {
     /// Steps the emulator by one instruction.
     fn step(&mut self) -> Result<()> {
         let mut stop_break = false;
+        if self.execution_callbacks.active() {
+            let observations = self.config.observe_execution(&mut self.execution_callbacks);
+            for observation in observations {
+                let pages = if self.execution_callbacks.include_memory() {
+                    self.config
+                        .ram_dirty()
+                        .iter()
+                        .map(|page| {
+                            let start = page * RAM_DIRTY_PAGESIZE;
+                            let end = (start + RAM_DIRTY_PAGESIZE).min(self.config.ram().len());
+                            (
+                                start as Address,
+                                self.config.ram()[start..end].to_vec(),
+                                self.config.ram().len(),
+                            )
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+                if self.execution_callbacks.include_memory() {
+                    self.config.ram_dirty_mut().clear();
+                }
+                self.event_sender.send(EmulatorEvent::CallObservation {
+                    source: observation.source,
+                    returning: observation.returning,
+                    entry: observation.entry,
+                    registers: self.config.cpu_regs().clone(),
+                    memory: pages,
+                })?;
+            }
+        }
         self.config.cpu_tick(1)?;
         if let Some((opcode, include_memory)) = self.config.cpu_take_trap_callback() {
             let memory = if include_memory {
@@ -1292,6 +1351,14 @@ impl Tickable for Emulator {
                                 // cycles later.
                                 .map(|(t, c)| (t - recording_offset + cycles, c)),
                         );
+                    }
+                    EmulatorCommand::SetExecutionCallbacks {
+                        traps,
+                        vectors,
+                        include_memory,
+                    } => {
+                        self.execution_callbacks
+                            .configure(traps, vectors, include_memory);
                     }
                     EmulatorCommand::SetTrapCallbacks(callbacks) => {
                         self.config.cpu_set_trap_callbacks(callbacks)

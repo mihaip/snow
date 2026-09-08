@@ -209,18 +209,30 @@ fn main() {
         let active = js_api::inspector::active();
         if active != trap_capture_active {
             cmd_sender
-                .send(EmulatorCommand::SetTrapCallbacks(if active {
-                    vec![(0xa99a, true), (0xab9a, true)]
-                } else {
-                    vec![]
-                }))
+                .send(EmulatorCommand::SetExecutionCallbacks {
+                    traps: if active {
+                        // Resource Manager, plus common consumers which can load
+                        // through direct calls instead of another A-line trap.
+                        let base = [
+                            0xa992, 0xa997, 0xa998, 0xa999, 0xa99a, 0xa99b, 0xa99d, 0xa9a0, 0xa9a1,
+                            0xa9a2, 0xa9a3, 0xa9ab, 0xa9ad, 0xa9b0, 0xa9c4, 0xa80e, 0xa81a, 0xa81f,
+                            0xa820, 0xa97c, 0xa985, 0xa986, 0xa987, 0xa988, 0xa9b8, 0xa9b9, 0xa9ba,
+                            0xa9bb, 0xa9bc, 0xa9bd, 0xa9be, 0xa9bf, 0xa9c0, 0xaa1e, 0xaa46, 0xa80c,
+                            0xa822, 0xaa0c, 0xaa1b,
+                        ];
+                        base.into_iter().flat_map(|op| [op, op | 0x0400]).collect()
+                    } else {
+                        vec![]
+                    },
+                    vectors: if active { vec![0x07f0] } else { vec![] },
+                    include_memory: true,
+                })
                 .unwrap();
             trap_capture_active = active;
         }
         js_api::runtime::check_for_periodic_tasks();
         input_receiver.tick();
 
-        let mut memory_updated = false;
         while let Ok(event) = event_recv.try_recv() {
             match event {
                 EmulatorEvent::Status(status) => {
@@ -229,12 +241,32 @@ fn main() {
                     });
                     last_status = Some(status);
                 }
+                EmulatorEvent::CallObservation {
+                    source,
+                    returning,
+                    entry,
+                    registers,
+                    memory,
+                } => {
+                    for (addr, data, size) in memory {
+                        memory_mirror.update(addr, &data, size);
+                    }
+                    js_api::inspector::call_observation(
+                        memory_mirror.get_memory(),
+                        source,
+                        returning,
+                        registers.a[0],
+                        registers.a[2],
+                        entry.d[3],
+                        entry.pc,
+                    );
+                }
                 EmulatorEvent::TrapCallback { opcode, memory } => {
                     if let Some(pages) = memory {
                         for (addr, data, size) in pages {
                             memory_mirror.update(addr, &data, size);
                         }
-                        if opcode & 0xfdff == 0xa99a {
+                        if opcode & 0xfbff == 0xa99a {
                             js_api::inspector::before_resource_file_close(
                                 memory_mirror.get_memory(),
                             );
@@ -243,7 +275,6 @@ fn main() {
                 }
                 EmulatorEvent::Memory((addr, data, size)) => {
                     memory_mirror.update(addr, &data, size);
-                    memory_updated = true;
                 }
                 EmulatorEvent::UserMessage(message_type, message) => match message_type {
                     UserMessageType::Error => js_api::runtime::report_error(&message),
@@ -256,10 +287,11 @@ fn main() {
             }
         }
 
-        // Drain the entire batch before inspection. All dirty pages were
-        // captured together by status_update, with no CPU execution between.
-        if memory_updated {
-            js_api::inspector::capture(memory_mirror.get_memory());
+        // Drain all ordered RAM deltas before periodic reconciliation. Trap
+        // observations can consume every dirty page, so event publication must
+        // not depend on receiving an ordinary Memory event in this batch.
+        if active && !memory_mirror.get_memory().is_empty() {
+            js_api::inspector::tick(memory_mirror.get_memory());
         }
 
         if let Some(update) = clipboard_sync.tick(&memory_mirror) {
