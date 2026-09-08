@@ -581,6 +581,11 @@ impl EmulatorState {
                         .push_back((UserMessageType::Notice, format!("CD-ROM #{} ejected", id)));
                 }
                 EmulatorEvent::UserMessage(t, s) => self.messages.push_back((t, s)),
+                EmulatorEvent::TrapCallback { memory, .. } => {
+                    if let Some(pages) = memory {
+                        self.ram_update.extend(pages);
+                    }
+                }
                 EmulatorEvent::Memory(update) => {
                     self.ram_update.push_back(update);
                 }

@@ -416,3 +416,29 @@ fn test_all_illegal_opcodes() {
         }
     }
 }
+
+#[test]
+fn trap_callbacks_do_not_stop_or_execute_handler() {
+    for include_memory in [false, true] {
+        for opcode in [0xa99a, 0xab9a] {
+            let mut cpu = testcpu(0x8000, 0x1000, &[opcode, 0x4e71]);
+            write_long(&mut cpu, 0x28, 0x400);
+            write_word(&mut cpu, 0x400, 0x7007); // MOVEQ #7,D0
+            write_word(&mut cpu, 0x402, 0x4e71);
+            cpu.set_trap_callbacks(vec![(opcode, include_memory)]);
+            cpu.step().unwrap();
+            assert_eq!(cpu.take_trap_callback(), Some((opcode, include_memory)));
+            assert_eq!(cpu.take_trap_callback(), None);
+            assert!(!cpu.get_clr_breakpoint_hit());
+            assert_eq!(cpu.regs.pc, 0x400);
+            assert_eq!(cpu.regs.d[0], 0); // Handler has not executed.
+            cpu.step().unwrap();
+            assert_eq!(cpu.regs.d[0], 7);
+            cpu.set_trap_callbacks(vec![]);
+            cpu.set_pc(0x1000).unwrap();
+            cpu.prefetch_refill().unwrap();
+            cpu.step().unwrap();
+            assert_eq!(cpu.take_trap_callback(), None);
+        }
+    }
+}

@@ -14,6 +14,20 @@ mergeInto(LibraryManager.library, {
     },
 
     // Runtime
+    js_inspector_before_close(ptr, length) {
+        try {
+            workerApi.inspector?.beforeResourceFileClose(HEAPU8.subarray(ptr, ptr + length));
+        } catch (_) { /* Inspection must not interrupt guest execution. */ }
+    },
+    js_inspector_initialized(model) {
+        workerApi.inspector?.initialize(model);
+    },
+    js_inspector_active() {
+        return workerApi.inspector?.active() ? 1 : 0;
+    },
+    js_inspector_capture(ptr, length) {
+        workerApi.inspector?.capture(HEAPU8.subarray(ptr, ptr + length));
+    },
     js_sleep(seconds) {
         workerApi.sleep(seconds);
     },

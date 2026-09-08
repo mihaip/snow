@@ -199,14 +199,28 @@ fn main() {
     cmd_sender.send(EmulatorCommand::Run).unwrap();
 
     let mut framebuffer_sender = framebuffer::Sender::new(frame_receiver);
-    let input_receiver = input::Receiver::new(cmd_sender, mouse_mode);
+    let input_receiver = input::Receiver::new(cmd_sender.clone(), mouse_mode);
     let mut memory_mirror = memory::MemoryMirror::new();
     let mut clipboard_sync = clipboard::ClipboardSync::new();
     let mut last_status: Option<Box<EmulatorStatus>> = None;
+    js_api::inspector::initialized(gestalt_id);
+    let mut trap_capture_active = false;
     loop {
+        let active = js_api::inspector::active();
+        if active != trap_capture_active {
+            cmd_sender
+                .send(EmulatorCommand::SetTrapCallbacks(if active {
+                    vec![(0xa99a, true), (0xab9a, true)]
+                } else {
+                    vec![]
+                }))
+                .unwrap();
+            trap_capture_active = active;
+        }
         js_api::runtime::check_for_periodic_tasks();
         input_receiver.tick();
 
+        let mut memory_updated = false;
         while let Ok(event) = event_recv.try_recv() {
             match event {
                 EmulatorEvent::Status(status) => {
@@ -215,8 +229,21 @@ fn main() {
                     });
                     last_status = Some(status);
                 }
+                EmulatorEvent::TrapCallback { opcode, memory } => {
+                    if let Some(pages) = memory {
+                        for (addr, data, size) in pages {
+                            memory_mirror.update(addr, &data, size);
+                        }
+                        if opcode & 0xfdff == 0xa99a {
+                            js_api::inspector::before_resource_file_close(
+                                memory_mirror.get_memory(),
+                            );
+                        }
+                    }
+                }
                 EmulatorEvent::Memory((addr, data, size)) => {
                     memory_mirror.update(addr, &data, size);
+                    memory_updated = true;
                 }
                 EmulatorEvent::UserMessage(message_type, message) => match message_type {
                     UserMessageType::Error => js_api::runtime::report_error(&message),
@@ -227,6 +254,12 @@ fn main() {
                 },
                 _ => {}
             }
+        }
+
+        // Drain the entire batch before inspection. All dirty pages were
+        // captured together by status_update, with no CPU execution between.
+        if memory_updated {
+            js_api::inspector::capture(memory_mirror.get_memory());
         }
 
         if let Some(update) = clipboard_sync.tick(&memory_mirror) {

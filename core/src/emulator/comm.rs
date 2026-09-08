@@ -30,6 +30,9 @@ pub type InputRecording = Vec<(Ticks, EmulatorCommand)>;
 /// A command/event that can be sent to the emulator
 #[derive(Serialize, Deserialize, Clone)]
 pub enum EmulatorCommand {
+    /// Replace non-stopping A-line callbacks: (exact opcode, include RAM delta).
+    /// An empty list unregisters all callbacks. Does not alter debugger breakpoints.
+    SetTrapCallbacks(Vec<(u16, bool)>),
     Quit,
     /// Inserts a floppy image, passing the image as boxed object.
     /// Parameters: drive id, image, write-protect
@@ -190,6 +193,13 @@ pub enum UserMessageType {
 /// A status message/event received from the emulator
 #[derive(strum::Display)]
 pub enum EmulatorEvent {
+    /// After A-line exception entry, before any trap-handler instruction executes.
+    /// Optional RAM updates share the ordered Memory-event delta stream and must
+    /// be applied before invoking a frontend callback. CPU execution is not paused.
+    TrapCallback {
+        opcode: u16,
+        memory: Option<Vec<(Address, Vec<u8>, usize)>>,
+    },
     Status(Box<EmulatorStatus>),
     NextCode((Address, Vec<u8>)),
     UserMessage(UserMessageType, String),

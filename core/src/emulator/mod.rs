@@ -206,6 +206,8 @@ dispatch! {
         fn set_bus_frequency(&mut self, bus_frequency: u64) -> () { bus.set_bus_frequency(bus_frequency) }
         fn set_audio_provider(&mut self, provider: &mut dyn AudioProvider) -> Result<()> { bus.set_audio_provider(provider) }
 
+        fn cpu_set_trap_callbacks(&mut self, callbacks: Vec<(u16, bool)>) -> () { set_trap_callbacks(callbacks) }
+        fn cpu_take_trap_callback(&mut self) -> Option<(u16, bool)> { take_trap_callback() }
         fn cpu_tick(&mut self, ticks: Ticks) -> Result<Ticks> { tick(ticks, ()) }
         fn cpu_set_breakpoint(&mut self, bp: Breakpoint) -> () { set_breakpoint(bp) }
         fn cpu_breakpoints_mut(&mut self) -> &mut Vec<Breakpoint> { breakpoints_mut() }
@@ -728,6 +730,30 @@ impl Emulator {
     fn step(&mut self) -> Result<()> {
         let mut stop_break = false;
         self.config.cpu_tick(1)?;
+        if let Some((opcode, include_memory)) = self.config.cpu_take_trap_callback() {
+            let memory = if include_memory {
+                let pages = self
+                    .config
+                    .ram_dirty()
+                    .iter()
+                    .map(|page| {
+                        let start = page * RAM_DIRTY_PAGESIZE;
+                        let end = (start + RAM_DIRTY_PAGESIZE).min(self.config.ram().len());
+                        (
+                            start as Address,
+                            self.config.ram()[start..end].to_vec(),
+                            self.config.ram().len(),
+                        )
+                    })
+                    .collect();
+                self.config.ram_dirty_mut().clear();
+                Some(pages)
+            } else {
+                None
+            };
+            self.event_sender
+                .send(EmulatorEvent::TrapCallback { opcode, memory })?;
+        }
 
         // Mac 512K: 0x402154, Mac Plus: 0x418CCC
         //if self.config.swim().drives[0].track == 2 {
@@ -1266,6 +1292,9 @@ impl Tickable for Emulator {
                                 // cycles later.
                                 .map(|(t, c)| (t - recording_offset + cycles, c)),
                         );
+                    }
+                    EmulatorCommand::SetTrapCallbacks(callbacks) => {
+                        self.config.cpu_set_trap_callbacks(callbacks)
                     }
                     EmulatorCommand::SetInstructionHistory(v) => self.config.cpu_enable_history(v),
                     EmulatorCommand::SetSystrapHistory(v) => {

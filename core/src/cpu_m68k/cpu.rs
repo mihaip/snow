@@ -327,6 +327,12 @@ pub struct CpuM68k<
     /// Active breakpoints
     pub(in crate::cpu_m68k) breakpoints: Vec<Breakpoint>,
 
+    /// Non-stopping trap notifications, independent of debugger breakpoints.
+    #[serde(skip)]
+    trap_callbacks: Vec<(u16, bool)>,
+    #[serde(skip)]
+    trap_callback_hit: Option<(u16, bool)>,
+
     /// Breakpoint hit latch
     #[serde(skip)]
     pub(in crate::cpu_m68k) breakpoint_hit: LatchingEvent,
@@ -416,6 +422,8 @@ where
             decode_cache: empty_decode_cache(),
             trace_mask: false,
             breakpoints: vec![],
+            trap_callbacks: vec![],
+            trap_callback_hit: None,
             breakpoint_hit: LatchingEvent::default(),
             step_over_addr: None,
             history: VecDeque::with_capacity(Self::HISTORY_SIZE),
@@ -459,6 +467,19 @@ where
         self.prefetch_refill()?;
 
         Ok(())
+    }
+
+    /// Replace exact A-line notifications without changing debugger state.
+    pub fn set_trap_callbacks(&mut self, callbacks: Vec<(u16, bool)>) {
+        self.trap_callbacks = callbacks
+            .into_iter()
+            .filter(|(trap, _)| trap & 0xf000 == 0xa000)
+            .collect();
+        self.trap_callback_hit = None;
+    }
+
+    pub fn take_trap_callback(&mut self) -> Option<(u16, bool)> {
+        self.trap_callback_hit.take()
     }
 
     /// Tests if a breakpoint was hit
@@ -1451,6 +1472,13 @@ where
             InstructionMnemonic::ROL_ea => self.op_shrot_ea(instr, Self::alu_rol),
             InstructionMnemonic::ROR_ea => self.op_shrot_ea(instr, Self::alu_ror),
             InstructionMnemonic::LINEA => {
+                if let Some(callback) = self
+                    .trap_callbacks
+                    .iter()
+                    .find(|(trap, _)| *trap == instr.data)
+                {
+                    self.trap_callback_hit = Some(*callback);
+                }
                 if self.breakpoints.contains(&Breakpoint::LineA(instr.data)) {
                     info!(
                         "Breakpoint hit (LINEA): ${:04X}, PC: ${:08X}",
