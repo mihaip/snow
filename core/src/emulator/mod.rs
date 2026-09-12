@@ -576,6 +576,11 @@ impl Emulator {
         self.config.rtc_mut().load_pram(pram_path);
     }
 
+    /// Enables or disables polling-driven logging of PRAM changes.
+    pub fn set_pram_logging(&mut self, enabled: bool) {
+        self.config.rtc_mut().set_pram_logging(enabled);
+    }
+
     /// Sets the RTC to a specific date/time.
     /// This can be used to test date-dependent software behavior (e.g., easter eggs).
     pub fn set_datetime(&mut self, dt: chrono::NaiveDateTime) {
