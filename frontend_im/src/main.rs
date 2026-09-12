@@ -4,6 +4,7 @@ use snow_core::emulator::comm::{EmulatorCommand, EmulatorEvent, EmulatorStatus, 
 use snow_core::emulator::{Emulator, MouseMode};
 use snow_core::mac::{ExtraROMs, MacModel, MacMonitor};
 use snow_core::tickable::Tickable;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::cdrom::CdromManager;
@@ -37,6 +38,7 @@ fn main() {
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
     let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
+    let pram_path: Option<String> = args.opt_value_from_str("--pram").unwrap();
     let debug_log = args.contains("--debug-log");
     let mouse_mode = if args.contains("--use-mouse-deltas") {
         MouseMode::RelativeHw
@@ -101,6 +103,9 @@ fn main() {
         None,
     )
     .expect("Failed to create emulator");
+    if let Some(pram_path) = pram_path {
+        emulator.persist_pram(Path::new(&pram_path));
+    }
     emulator.set_pram_logging(debug_log);
     emulator.set_shared_dirs(
         bluescsi_dir.map(std::path::PathBuf::from),
