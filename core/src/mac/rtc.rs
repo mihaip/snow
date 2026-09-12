@@ -66,6 +66,10 @@ pub struct Rtc {
     effective_speed: f64,
     #[serde(skip)]
     last_second_real_time_ms: Option<i64>,
+
+    /// Previous PRAM contents used to report changes while debug logging is enabled.
+    #[serde(skip)]
+    logged_pram: Option<Vec<u8>>,
 }
 
 fn default_effective_speed() -> f64 {
@@ -187,6 +191,7 @@ impl Default for Rtc {
             },
             effective_speed: 1.0,
             last_second_real_time_ms: Some(Local::now().timestamp_millis()),
+            logged_pram: None,
         }
     }
 }
@@ -204,6 +209,14 @@ impl Rtc {
         info!("Persisting PRAM in {}", filename.display());
 
         self.data.pram = pram;
+        if self.logged_pram.is_some() {
+            self.logged_pram = Some(self.data.pram.to_vec());
+        }
+    }
+
+    /// Enables or disables polling-driven logging of PRAM changes.
+    pub fn set_pram_logging(&mut self, enabled: bool) {
+        self.logged_pram = enabled.then(|| self.data.pram.to_vec());
     }
 
     /// Sets the RTC to a specific date/time.
@@ -220,6 +233,7 @@ impl Rtc {
     /// Pokes the RTC that one second has passed
     /// In the emulator, one second interrupt is driven by the VIA for ease.
     pub fn second(&mut self) {
+        self.log_pram_changes();
         self.data.seconds = self.data.seconds.wrapping_add(1);
 
         let now_ms = Local::now().timestamp_millis();
@@ -231,6 +245,23 @@ impl Rtc {
             }
         }
         self.last_second_real_time_ms = Some(now_ms);
+    }
+
+    fn log_pram_changes(&mut self) {
+        let Some(logged_pram) = self.logged_pram.as_mut() else {
+            return;
+        };
+
+        for (addr, (logged, current)) in logged_pram
+            .iter_mut()
+            .zip(self.data.pram.iter())
+            .enumerate()
+        {
+            if *logged != *current {
+                info!("PRAM[{addr:02X}] changed from {logged:02X} to {current:02X}");
+                *logged = *current;
+            }
+        }
     }
 
     pub fn effective_speed(&self) -> f64 {
