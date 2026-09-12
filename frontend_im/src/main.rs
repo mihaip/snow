@@ -22,11 +22,6 @@ mod memory;
 mod removable_media;
 
 fn main() {
-    env_logger::Builder::new()
-        .target(env_logger::Target::Stderr)
-        .filter_level(log::LevelFilter::Trace)
-        .init();
-
     let mut args = pico_args::Arguments::from_env();
     let rom_path: String = args.value_from_str("--rom").unwrap();
     let disk_names: Vec<String> = args.values_from_str("--disk").unwrap();
@@ -42,11 +37,17 @@ fn main() {
     let ram_size: usize = args.value_from_str("--ram-size").unwrap();
     let monitor_id: Option<String> = args.opt_value_from_str("--monitor").unwrap();
     let extra_rom_paths: Vec<String> = args.values_from_str("--extra-rom").unwrap_or_default();
+    let debug_log = args.contains("--debug-log");
     let mouse_mode = if args.contains("--use-mouse-deltas") {
         MouseMode::RelativeHw
     } else {
         MouseMode::Absolute
     };
+
+    let default_log_filter = if debug_log { "trace" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log_filter))
+        .target(env_logger::Target::Stderr)
+        .init();
 
     let rom_data = std::fs::read(&rom_path).expect("Failed to read ROM");
 
@@ -100,6 +101,7 @@ fn main() {
         None,
     )
     .expect("Failed to create emulator");
+    emulator.set_pram_logging(debug_log);
     emulator.set_shared_dirs(
         bluescsi_dir.map(std::path::PathBuf::from),
         bluescsi_send_dir.map(std::path::PathBuf::from),
