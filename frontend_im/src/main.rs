@@ -66,6 +66,7 @@ fn main() {
     let monitor = monitor_id.map(|id| match id.as_str() {
         "RGB12" => MacMonitor::RGB12,
         "HiRes14" => MacMonitor::HiRes14,
+        "RGB16" => MacMonitor::RGB16,
         "RGB21" => MacMonitor::RGB21,
         "PortraitBW" => MacMonitor::PortraitBW,
         _ => panic!("Unknown monitor ID '{}'", id),
