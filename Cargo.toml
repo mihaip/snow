@@ -32,6 +32,7 @@ debug = true
 # Patch egui to fix menubar hover behavior.
 # See https://github.com/twvd/snow/pull/251#issuecomment-4103953334
 [patch.crates-io]
+arpfloat = { git = "https://github.com/mihaip/arpfloat.git", rev = "19d55cece82ddecc948207f06cfdbf20aa4e8d3a" }
 ecolor = { git = "https://github.com/twvd/snow-egui.git", rev = "7e06cfd6261d3e42a15002fe80816fba88557dc1"}
 emath = { git = "https://github.com/twvd/snow-egui.git", rev = "7e06cfd6261d3e42a15002fe80816fba88557dc1"}
 epaint = { git = "https://github.com/twvd/snow-egui.git", rev = "7e06cfd6261d3e42a15002fe80816fba88557dc1"}
