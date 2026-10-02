@@ -10,8 +10,16 @@ pub mod tickable;
 pub mod types;
 pub mod util;
 
+#[cfg(not(target_os = "emscripten"))]
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+#[cfg(target_os = "emscripten")]
+pub mod built_info {
+    pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+    pub const GIT_COMMIT_HASH_SHORT: Option<&str> = None;
+    pub const GIT_DIRTY: Option<bool> = None;
 }
 
 pub fn build_version() -> String {

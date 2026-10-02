@@ -29,6 +29,9 @@ semicolon_if_nothing_returned = "deny"
 opt-level = 3
 debug = true
 
+[profile.release]
+panic = "abort"
+
 # Patch egui to fix menubar hover behavior.
 # See https://github.com/twvd/snow/pull/251#issuecomment-4103953334
 [patch.crates-io]

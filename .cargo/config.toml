@@ -12,14 +12,3 @@ rustflags = [
     "-C", "link-arg=-L./frontend_im/src",
     "-C", "link-arg=--js-library=./frontend_im/src/js_api/exports.js",
 ]
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "emscripten", debug_assertions))']
-rustflags = [
-    "-C", "link-arg=-sASSERTIONS=2",
-    "-C", "link-arg=-sSTACK_OVERFLOW_CHECK=2",
-]
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "emscripten", not(debug_assertions)))']
-rustflags = [
-    "-C", "lto",
-]
