@@ -29,10 +29,10 @@ From the parent `infinite-mac` root directory:
 # Fast iteration: check compilation without linking
 scripts/docker-shell.sh -c "source /emsdk/emsdk_env.sh && cd /snow && cargo check -p snow_frontend_im --target wasm32-unknown-emscripten"
 
-# Debug build: no LTO, faster compile (~33s)
+# Debug build: no LTO, faster iteration
 scripts/docker-shell.sh -c "source /emsdk/emsdk_env.sh && cd /snow && cargo build -p snow_frontend_im --target wasm32-unknown-emscripten"
 
-# Release build: with LTO, optimized output (~38s)
+# Release build: aborting panics, optimized output
 scripts/docker-shell.sh -c "source /emsdk/emsdk_env.sh && cd /snow && cargo build -r -p snow_frontend_im --target wasm32-unknown-emscripten"
 
 # Interactive shell for debugging
@@ -50,6 +50,11 @@ Build outputs appear in `snow/target/wasm32-unknown-emscripten/release/` (or `de
 - `snow.wasm.map` - Source map
 
 See `.cargo/config.toml` for Emscripten-specific flags.
+The workspace release profile in `Cargo.toml` enables aborting panics and uses
+Cargo's default optimization settings, without cross-crate LTO.
+Debug-only Emscripten assertions and stack checks are selected by
+`frontend_im/build.rs`; Cargo target cfg expressions cannot match
+`debug_assertions` to choose flags by profile.
 
 ### Import into Infinite Mac
 
@@ -163,6 +168,7 @@ snow/
 │   │   └── ...
 │   └── Cargo.toml
 ├── frontend_im/              # Infinite Mac frontend (web)
+│   ├── build.rs              # Debug-only Emscripten linker flags
 │   ├── src/main.rs           # CLI entry point and wiring for the web build
 │   ├── src/disk.rs           # JS-backed disk image backend for SCSI targets
 │   ├── src/framebuffer.rs    # Framebuffer bridge for video output
