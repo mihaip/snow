@@ -12,8 +12,14 @@ use strum::EnumIter;
 use crate::loaders::ImageType;
 use flux::FluxTicks;
 
+#[cfg(not(target_os = "emscripten"))]
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+#[cfg(target_os = "emscripten")]
+pub mod built_info {
+    pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 }
 
 /// Key/value collection of floppy metadata.
