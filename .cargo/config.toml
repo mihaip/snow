@@ -2,6 +2,7 @@
 rustflags = [
     "-C", "link-arg=-sSTACK_SIZE=16mb",
     "-C", "link-arg=-sINITIAL_HEAP=512mb", # 128 MB RAM x 4 overhead
+    "-C", "link-arg=-sEXIT_RUNTIME=1",
     "-C", "link-arg=-sMODULARIZE",
     "-C", "link-arg=-sEXPORT_ES6",
     "-C", "link-arg=-sEXPORT_NAME=emulator",
