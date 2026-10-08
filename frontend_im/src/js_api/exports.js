@@ -3,6 +3,7 @@
 // outside of it.
 
 mergeInto(LibraryManager.library, {
+    $snowNameToCString__deps: ["malloc"],
     $snowNameToCString(name) {
         if (!name || !name.length) {
             return 0;
@@ -78,6 +79,7 @@ mergeInto(LibraryManager.library, {
     js_consume_floppy_name() {
         return snowNameToCString(workerApi.disks.consumeFloppyName());
     },
+    js_free__deps: ["free"],
     js_free(ptr) {
         _free(ptr);
     },
