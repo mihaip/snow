@@ -266,6 +266,7 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
     (7, MacModel::MacIIx),
     (8, MacModel::MacIIcx),
     (9, MacModel::SE30),
+    (10, MacModel::Portable),
     (17, MacModel::Classic),
 ];
 
