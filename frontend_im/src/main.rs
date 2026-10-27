@@ -90,6 +90,7 @@ fn main() {
         };
         extra_roms.push(rom);
     }
+    let fpu_enabled = false;
     let (mut emulator, frame_receiver) = Emulator::new_with_extra(
         &rom_data,
         &extra_roms,
@@ -101,6 +102,8 @@ fn main() {
         // We don't expose a separate PPMU option, so just trigger it for the
         // FDHD model.
         model == MacModel::MacIIFDHD,
+        fpu_enabled,
+        None,
         None,
     )
     .expect("Failed to create emulator");
@@ -268,6 +271,9 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
     (9, MacModel::SE30),
     (10, MacModel::Portable),
     (17, MacModel::Classic),
+    (19, MacModel::LC),
+    (27, MacModel::LCIII),
+    (37, MacModel::LCII),
 ];
 
 const PRINTER_SCSI_SCAN_ORDER: [usize; 7] = [4, 3, 2, 1, 0, 6, 5];
