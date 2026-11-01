@@ -1,6 +1,11 @@
 extern "C" {
+    fn js_consume_frame_request() -> i32;
     fn js_did_open_video(width: u32, height: u32);
     fn js_blit(buf_ptr: *const u8, buf_size: u32);
+}
+
+pub fn consume_frame_request() -> bool {
+    unsafe { js_consume_frame_request() != 0 }
 }
 
 pub fn did_open(width: u32, height: u32) {
