@@ -20,12 +20,20 @@ impl Sender {
     }
 
     pub fn tick(&mut self) {
-        while let Some(frame) = {
+        let frame = {
             let mut lock = self.receiver.lock().unwrap();
-            lock.take()
-        } {
-            self.send_frame(frame);
-        }
+            // Wait for the core to have a frame _and_ for the browser to
+            // request one. By not taking a queued frame if it's not needed, we
+            // let the core skip generating extra frames (ChannelRenderer::frame_wanted()
+            // is false), which improves performance.
+            // Check the core first to avoid consuming and throwing away the
+            // browser request.
+            if lock.is_none() || !js_api::video::consume_frame_request() {
+                return;
+            }
+            lock.take().unwrap()
+        };
+        self.send_frame(frame);
     }
 
     fn send_frame(&mut self, frame: DisplayBuffer) {

@@ -37,6 +37,9 @@ mergeInto(LibraryManager.library, {
     },
 
     // Video
+    js_consume_frame_request() {
+        return workerApi.consumeFrameRequest() ? 1 : 0;
+    },
     js_did_open_video(width, height) {
         workerApi.didOpenVideo(width, height);
     },
