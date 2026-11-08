@@ -272,6 +272,8 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
     (19, MacModel::LC),
     (27, MacModel::LCIII),
     (37, MacModel::LCII),
+    (22, MacModel::Quadra700),
+    (89, MacModel::LC475),
 ];
 
 const PRINTER_SCSI_SCAN_ORDER: [usize; 7] = [4, 3, 2, 1, 0, 6, 5];
