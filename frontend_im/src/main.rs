@@ -273,6 +273,7 @@ const GESTALT_MODEL_MAP: &[(u32, MacModel)] = &[
     (27, MacModel::LCIII),
     (37, MacModel::LCII),
     (22, MacModel::Quadra700),
+    (35, MacModel::Quadra800),
     (89, MacModel::LC475),
 ];
 
